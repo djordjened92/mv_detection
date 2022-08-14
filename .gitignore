@@ -42,6 +42,8 @@ coco/
 coco128/
 VOC/
 
+Wildtrack_dataset/
+
 coco2017labels-segments.zip
 test2017.zip
 train2017.zip
