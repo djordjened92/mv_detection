@@ -486,7 +486,9 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
                 if os.path.isfile(lb_file):
                     nf += 1  # label found
                     with open(lb_file, 'r') as f:
-                        l = [x.split() for x in f.read().strip().splitlines()]
+                        labels = [x.split() for x in f.read().strip().splitlines()]
+                        labels = [(x[0], x[1], [0] + x[2:]) for x in labels] # split personID, positionID and yolo labels
+                        pID, pos, l = [list(x) for x in list(zip(*labels))]
                         if any([len(x) > 8 for x in l]):  # is segment
                             classes = np.array([x[0] for x in l], dtype=np.float32)
                             segments = [np.array(x[1:], dtype=np.float32).reshape(-1, 2) for x in l]  # (cls, xy1...)

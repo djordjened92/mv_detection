@@ -10,7 +10,7 @@ IMAGE_WIDTH = 1920
 TRAIN_RATIO = 0.9
 NUM_VIEWS = 7
 
-def generate_yolo_labels(wt_json, out_dir, ds_split_list):
+def generate_yolo_labels(wt_json, out_dir, out_imgs_dir, ds_split_list):
     json_name = os.path.basename(wt_json).split('.')[0]
     
     frame_multi_view = dict(zip(range(NUM_VIEWS), [[]]*NUM_VIEWS))
@@ -29,11 +29,17 @@ def generate_yolo_labels(wt_json, out_dir, ds_split_list):
                                          view['ymin']])):
                 continue
 
+            # Clip coordinates
+            xmax = min(max(view['xmax'], 0), IMAGE_WIDTH)
+            xmin = min(max(view['xmin'], 0), IMAGE_WIDTH)
+            ymax = min(max(view['ymax'], 0), IMAGE_HEIGHT)
+            ymin = min(max(view['ymin'], 0), IMAGE_HEIGHT)
+
             # Calculate yolo coordinates
-            x_center = ((view['xmax'] + view['xmin']) / 2) / IMAGE_WIDTH
-            y_center = ((view['ymax'] + view['ymin']) / 2) / IMAGE_HEIGHT
-            width = (view['xmax'] - view['xmin']) / IMAGE_WIDTH
-            height = (view['ymax'] - view['ymin']) / IMAGE_HEIGHT
+            x_center = ((xmax + xmin) / 2) / IMAGE_WIDTH
+            y_center = ((ymax + ymin) / 2) / IMAGE_HEIGHT
+            width = (xmax - xmin) / IMAGE_WIDTH
+            height = (ymax - ymin) / IMAGE_HEIGHT
 
             ann_string = f'{pedestrian["personID"]} {pedestrian["positionID"]} {x_center} {y_center} {width} {height}'
             frame_multi_view[view['viewNum']].append(ann_string)
@@ -44,7 +50,7 @@ def generate_yolo_labels(wt_json, out_dir, ds_split_list):
         with open(txt_path, 'w') as f:
             f.write('\n'.join(ann_strings))
         
-        ds_split_list.append(txt_path)
+        ds_split_list.append(os.path.join(out_imgs_dir, f'C{view_num + 1}_{json_name}.png'))
     
     return ds_split_list
 
@@ -68,8 +74,8 @@ def main():
 
     # Move and rename images
     print('Move images from the original per-camera structure into flat structure.')
-    for cam_dir in os.listdir(input_img_dir):
-        move_images(os.path.join(input_img_dir, cam_dir), out_imgs_dir)
+    # for cam_dir in os.listdir(input_img_dir):
+    #     move_images(os.path.join(input_img_dir, cam_dir), out_imgs_dir)
 
     # Load annotation json files
     ann_jsons = sorted(glob.glob(os.path.join(input_ann_dir, '*.json')))
@@ -80,25 +86,25 @@ def main():
     train_jsons = ann_jsons[:split_index]
     val_jsons = ann_jsons[split_index:]
 
-    train_txt_labels = []
-    val_txt_labels = []
+    train_imgs = []
+    val_imgs = []
 
     # Process training dataset
     print('Convert training dataset to the yolo format.')
     for json_path in tqdm(train_jsons):
-        generate_yolo_labels(json_path, out_ann_dir, train_txt_labels)
+        generate_yolo_labels(json_path, out_ann_dir, out_imgs_dir, train_imgs)
     
     # Process validation dataset
     print('Convert validation dataset to the yolo format.')
     for json_path in tqdm(val_jsons):
-        generate_yolo_labels(json_path, out_ann_dir, val_txt_labels)
+        generate_yolo_labels(json_path, out_ann_dir, out_imgs_dir, val_imgs)
     
     # Save final train and val list of annotation files
     with open('/home/djordje/Documents/Projects/mv_detection/Wildtrack_dataset/train.txt', 'w') as f:
-        f.write('\n'.join(train_txt_labels))
+        f.write('\n'.join(train_imgs))
     
     with open('/home/djordje/Documents/Projects/mv_detection/Wildtrack_dataset/val.txt', 'w') as f:
-        f.write('\n'.join(val_txt_labels))
+        f.write('\n'.join(val_imgs))
 
 if __name__ == '__main__':
     main()
