@@ -13,7 +13,7 @@ NUM_VIEWS = 7
 def generate_yolo_labels(wt_json, out_dir, out_imgs_dir, ds_split_list):
     json_name = os.path.basename(wt_json).split('.')[0]
     
-    frame_multi_view = dict(zip(range(NUM_VIEWS), [[]]*NUM_VIEWS))
+    frame_multi_view = dict(zip(range(NUM_VIEWS), [[] for _ in range(NUM_VIEWS)]))
 
     # Load WILDTRACK annotation
     with open(wt_json) as f:
