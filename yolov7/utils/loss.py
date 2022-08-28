@@ -454,6 +454,7 @@ class ComputeLoss:
 
         # Losses
         for i, pi in enumerate(p):  # layer index, layer predictions
+            pi = pi[..., :-1]
             b, a, gj, gi = indices[i]  # image, anchor, gridy, gridx
             tobj = torch.zeros_like(pi[..., 0], device=device)  # target obj
 
@@ -588,6 +589,7 @@ class ComputeLossOTA:
 
         # Losses
         for i, pi in enumerate(p):  # layer index, layer predictions
+            pi = pi[..., :-1]
             b, a, gj, gi = bs[i], as_[i], gjs[i], gis[i]  # image, anchor, gridy, gridx
             tobj = torch.zeros_like(pi[..., 0], device=device)  # target obj
 
@@ -673,7 +675,7 @@ class ComputeLossOTA:
             all_anch = []
             
             for i, pi in enumerate(p):
-                
+                pi = pi[..., :-1]
                 b, a, gj, gi = indices[i]
                 idx = (b == batch_idx)
                 b, a, gj, gi = b[idx], a[idx], gj[idx], gi[idx]                
