@@ -126,6 +126,7 @@ class frameDataset(VisionDataset):
         frame = list(self.map_gt.keys())[index]
         imgs = []
         ylabels = []
+        paths = []
 
         for cam in range(self.num_cam):
             fpath = self.img_fpaths[cam][frame]
@@ -135,6 +136,7 @@ class frameDataset(VisionDataset):
                 img = self.transform(img)
             imgs.append(img)
             ylabels.append(ylabel)
+            paths.append(fpath)
 
         imgs = torch.stack(imgs)
         map_gt = self.map_gt[frame].toarray()
@@ -142,14 +144,14 @@ class frameDataset(VisionDataset):
             map_gt = (map_gt > 0).int()
         if self.target_transform is not None:
             map_gt = self.target_transform(map_gt)
-        return imgs, ylabels, map_gt.float(), frame
+        return imgs, ylabels, map_gt.float(), frame, paths
 
     def __len__(self):
         return len(self.map_gt.keys())
 
     @staticmethod
     def collate_fn(batch):
-        imgs, ylabels, map_gts, frames = zip(*batch)  # transposed
+        imgs, ylabels, map_gts, frames, paths = zip(*batch)  # transposed
 
         ylabels_out = []
         for b_i, mv_l in enumerate(ylabels):
@@ -160,8 +162,9 @@ class frameDataset(VisionDataset):
 
         ylabels_out = torch.cat(ylabels_out, 0)
         imgs_out = torch.cat(imgs, 0)
+        paths_out = [p for bp in paths for p in bp]
 
-        return imgs_out, ylabels_out, map_gts, frames
+        return imgs_out, ylabels_out, map_gts, frames, paths_out
 
 
 def test():

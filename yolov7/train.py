@@ -240,9 +240,12 @@ def train(hyp, opt, device, tb_writer=None):
         logger.info('Using SyncBatchNorm()')
 
     # MultiView dataset
-    normalize = T.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
-    train_trans = T.Compose([T.Resize([imgsz, imgsz]), T.ToTensor(), normalize, ])
     base = Wildtrack(data_dict['data_root'])
+    normalize = T.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
+    h0, w0 = base.img_shape  # orig hw
+    r = imgsz / max(h0, w0)  # resize image to img_size
+    h, w = int(h0 * r), int(w0 * r)
+    train_trans = T.Compose([T.Resize([h, w]), T.ToTensor(), normalize, ])
     train_set = frameDataset(base, train=True, transform=train_trans, grid_reduce=4)
     dataloader = torch.utils.data.DataLoader(train_set,
                                              batch_size=batch_size,
@@ -255,10 +258,13 @@ def train(hyp, opt, device, tb_writer=None):
 
     # Process 0
     if rank in [-1, 0]:
-        # testloader = create_dataloader(test_path, imgsz_test, batch_size * 2, gs, opt,  # testloader
-        #                                hyp=hyp, cache=opt.cache_images and not opt.notest, rect=True, rank=-1,
-        #                                world_size=opt.world_size, workers=opt.workers,
-        #                                pad=0.5, prefix=colorstr('val: '))[0]
+        test_set = frameDataset(base, train=False, transform=train_trans, grid_reduce=4)
+        testloader = torch.utils.data.DataLoader(test_set,
+                                                 batch_size=batch_size,
+                                                 shuffle=True,
+                                                 num_workers=opt.workers,
+                                                 pin_memory=True,
+                                                 collate_fn=frameDataset.collate_fn)
 
         if not opt.resume:
             labels = np.concatenate(dataset_labels, 0)
@@ -336,7 +342,7 @@ def train(hyp, opt, device, tb_writer=None):
         if rank in [-1, 0]:
             pbar = tqdm(pbar, total=nb)  # progress bar
         optimizer.zero_grad()
-        for i, (imgs, targets, _, _) in pbar:  # batch -------------------------------------------------------------
+        for i, (imgs, targets, _, _, _) in pbar:  # batch -------------------------------------------------------------
             ni = i + nb * epoch  # number integrated batches (since train start)
             imgs = imgs.to(device, non_blocking=True).float() # uint8 to float32
 
@@ -420,6 +426,7 @@ def train(hyp, opt, device, tb_writer=None):
                 results, maps, times = test.test(data_dict,
                                                  batch_size=batch_size * 2,
                                                  imgsz=imgsz_test,
+                                                 shapes = ((h0, w0), ((h / h0, w / w0), 0.)),
                                                  model=ema.ema,
                                                  single_cls=opt.single_cls,
                                                  dataloader=testloader,
@@ -499,6 +506,7 @@ def train(hyp, opt, device, tb_writer=None):
                 results, _, _ = test.test(opt.data,
                                           batch_size=batch_size * 2,
                                           imgsz=imgsz_test,
+                                          shapes = ((h0, w0), ((h / h0, w / w0), 0.)),
                                           conf_thres=0.001,
                                           iou_thres=0.7,
                                           model=attempt_load(m, device).half(),

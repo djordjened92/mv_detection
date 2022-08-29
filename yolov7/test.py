@@ -22,11 +22,11 @@ def test(data,
          weights=None,
          batch_size=32,
          imgsz=640,
+         shapes=((640, 640), ((1., 1.), 0.)),
          conf_thres=0.001,
          iou_thres=0.6,  # for NMS
          save_json=False,
          single_cls=False,
-         augment=False,
          verbose=False,
          model=None,
          dataloader=None,
@@ -72,7 +72,7 @@ def test(data,
         is_coco = data.endswith('coco.yaml')
         with open(data) as f:
             data = yaml.load(f, Loader=yaml.SafeLoader)
-    check_dataset(data)  # check
+
     nc = 1 if single_cls else int(data['nc'])  # number of classes
     iouv = torch.linspace(0.5, 0.95, 10).to(device)  # iou vector for mAP@0.5:0.95
     niou = iouv.numel()
@@ -97,17 +97,16 @@ def test(data,
     p, r, f1, mp, mr, map50, map, t0, t1 = 0., 0., 0., 0., 0., 0., 0., 0., 0.
     loss = torch.zeros(3, device=device)
     jdict, stats, ap, ap_class, wandb_images = [], [], [], [], []
-    for batch_i, (img, targets, paths, shapes) in enumerate(tqdm(dataloader, desc=s)):
+    for batch_i, (img, targets, _, _, paths) in enumerate(tqdm(dataloader, desc=s)):
         img = img.to(device, non_blocking=True)
         img = img.half() if half else img.float()  # uint8 to fp16/32
-        img /= 255.0  # 0 - 255 to 0.0 - 1.0
         targets = targets.to(device)
         nb, _, height, width = img.shape  # batch size, channels, height, width
 
         with torch.no_grad():
             # Run model
             t = time_synchronized()
-            out, train_out = model(img, augment=augment)  # inference and training outputs
+            out, train_out = model(img)  # inference and training outputs
             t0 += time_synchronized() - t
 
             # Compute loss
@@ -136,11 +135,11 @@ def test(data,
 
             # Predictions
             predn = pred.clone()
-            scale_coords(img[si].shape[1:], predn[:, :4], shapes[si][0], shapes[si][1])  # native-space pred
+            scale_coords(img[si].shape[1:], predn[:, :4], shapes[0], shapes[1])  # native-space pred
 
             # Append to text file
             if save_txt:
-                gn = torch.tensor(shapes[si][0])[[1, 0, 1, 0]]  # normalization gain whwh
+                gn = torch.tensor(shapes[0])[[1, 0, 1, 0]]  # normalization gain whwh
                 for *xyxy, conf, cls in predn.tolist():
                     xywh = (xyxy2xywh(torch.tensor(xyxy).view(1, 4)) / gn).view(-1).tolist()  # normalized xywh
                     line = (cls, *xywh, conf) if save_conf else (cls, *xywh)  # label format
@@ -179,7 +178,7 @@ def test(data,
 
                 # target boxes
                 tbox = xywh2xyxy(labels[:, 1:5])
-                scale_coords(img[si].shape[1:], tbox, shapes[si][0], shapes[si][1])  # native-space labels
+                scale_coords(img[si].shape[1:], tbox, shapes[0], shapes[1])  # native-space labels
                 if plots:
                     confusion_matrix.process_batch(predn, torch.cat((labels[:, 0:1], tbox), 1))
 
