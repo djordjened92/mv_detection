@@ -610,12 +610,19 @@ class Model(nn.Module):
             inf_nms.append(nms)
 
         # Create outter product
-        nms_nodes = torch.cat([nms[..., -1].squeeze(-1) for nms in inf_nms], -1)
-        comb_matrix = torch.bmm(nms_nodes.unsqueeze(2), nms_nodes.unsqueeze(1))
+        comb_matrices = []
+        for view_boxes in zip(*inf_nms):
+            nodes = [boxes[..., -1] for boxes in view_boxes if boxes.numel()]
+            if len(nodes):
+                nodes = torch.cat(nodes, -1)
+                comb_matrix = torch.outer(nodes, nodes)
+                comb_matrices.append(comb_matrices)
+            else:
+                comb_matrices.append(None)
 
         initial_preds = [torch.cat([out[1][i] for out in inference], 0) for i in range(3)]
 
-        return initial_preds, inf_nms, comb_matrix
+        return initial_preds, inf_nms, comb_matrices
             
 
     def forward_once(self, x, profile=False):

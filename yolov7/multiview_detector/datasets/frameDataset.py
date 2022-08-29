@@ -126,36 +126,42 @@ class frameDataset(VisionDataset):
         frame = list(self.map_gt.keys())[index]
         imgs = []
         ylabels = []
+
         for cam in range(self.num_cam):
             fpath = self.img_fpaths[cam][frame]
             ylabel = self.yolo_labels[cam][frame]
             img = Image.open(fpath).convert('RGB')
             if self.transform is not None:
                 img = self.transform(img)
-            img = img.permute(2, 0, 1)
             imgs.append(img)
             ylabels.append(ylabel)
+
         imgs = torch.stack(imgs)
-        ylabels = torch.cat(ylabels, 0)
         map_gt = self.map_gt[frame].toarray()
         if self.reID:
             map_gt = (map_gt > 0).int()
         if self.target_transform is not None:
             map_gt = self.target_transform(map_gt)
-        imgs_gt = []
-        for cam in range(self.num_cam):
-            img_gt_head = self.imgs_head_foot_gt[frame][cam][0].toarray()
-            img_gt_foot = self.imgs_head_foot_gt[frame][cam][1].toarray()
-            img_gt = np.stack([img_gt_head, img_gt_foot], axis=2)
-            if self.reID:
-                img_gt = (img_gt > 0).int()
-            if self.target_transform is not None:
-                img_gt = self.target_transform(img_gt)
-            imgs_gt.append(img_gt.float())
-        return imgs, ylabels, map_gt.float(), imgs_gt, frame
+        return imgs, ylabels, map_gt.float(), frame
 
     def __len__(self):
         return len(self.map_gt.keys())
+
+    @staticmethod
+    def collate_fn(batch):
+        imgs, ylabels, map_gts, frames = zip(*batch)  # transposed
+
+        ylabels_out = []
+        for b_i, mv_l in enumerate(ylabels):
+            num_cam = len(mv_l)
+            for v_i, v_l in enumerate(mv_l):
+                v_l[:, 0] =  b_i * num_cam + v_i # add target image index for build_targets()
+            ylabels_out.append(torch.cat(mv_l, 0))
+
+        ylabels_out = torch.cat(ylabels_out, 0)
+        imgs_out = torch.cat(imgs, 0)
+
+        return imgs_out, ylabels_out, map_gts, frames
 
 
 def test():

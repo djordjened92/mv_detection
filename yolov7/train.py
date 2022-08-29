@@ -241,11 +241,15 @@ def train(hyp, opt, device, tb_writer=None):
 
     # MultiView dataset
     normalize = T.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
-    train_trans = T.Compose([T.Resize([720, 1280]), T.ToTensor(), normalize, ])
+    train_trans = T.Compose([T.Resize([imgsz, imgsz]), T.ToTensor(), normalize, ])
     base = Wildtrack(data_dict['data_root'])
     train_set = frameDataset(base, train=True, transform=train_trans, grid_reduce=4)
-    dataloader = torch.utils.data.DataLoader(train_set, batch_size=batch_size, shuffle=True,
-                                               num_workers=opt.workers, pin_memory=True)
+    dataloader = torch.utils.data.DataLoader(train_set,
+                                             batch_size=batch_size,
+                                             shuffle=True,
+                                             num_workers=opt.workers,
+                                             pin_memory=True,
+                                             collate_fn=frameDataset.collate_fn)
     nb = len(dataloader)
     dataset_labels = [label for f, camd in train_set.yolo_labels.items() for cam, label in camd.items()]
 
@@ -332,11 +336,10 @@ def train(hyp, opt, device, tb_writer=None):
         if rank in [-1, 0]:
             pbar = tqdm(pbar, total=nb)  # progress bar
         optimizer.zero_grad()
-        for i, (imgs, targets, _, _, _) in pbar:  # batch -------------------------------------------------------------
+        for i, (imgs, targets, _, _) in pbar:  # batch -------------------------------------------------------------
             ni = i + nb * epoch  # number integrated batches (since train start)
             imgs = imgs.to(device, non_blocking=True).float() # uint8 to float32
-            print(imgs.shape)
-            exit(0)
+
             # Warmup
             if ni <= nw:
                 xi = [0, nw]  # x interp
