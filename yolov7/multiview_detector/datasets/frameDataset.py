@@ -29,6 +29,7 @@ class frameDataset(VisionDataset):
             frame_range = range(int(self.num_frame * train_ratio), self.num_frame)
 
         self.img_fpaths = self.base.get_image_fpaths(frame_range)
+        self.yolo_labels = self.base.get_yolo_labels(frame_range)
         self.map_gt = {}
         self.imgs_head_foot_gt = {}
         self.download(frame_range)
@@ -124,13 +125,18 @@ class frameDataset(VisionDataset):
     def __getitem__(self, index):
         frame = list(self.map_gt.keys())[index]
         imgs = []
+        ylabels = []
         for cam in range(self.num_cam):
             fpath = self.img_fpaths[cam][frame]
+            ylabel = self.yolo_labels[cam][frame]
             img = Image.open(fpath).convert('RGB')
             if self.transform is not None:
                 img = self.transform(img)
+            img = img.permute(2, 0, 1)
             imgs.append(img)
+            ylabels.append(ylabel)
         imgs = torch.stack(imgs)
+        ylabels = torch.cat(ylabels, 0)
         map_gt = self.map_gt[frame].toarray()
         if self.reID:
             map_gt = (map_gt > 0).int()
@@ -146,7 +152,7 @@ class frameDataset(VisionDataset):
             if self.target_transform is not None:
                 img_gt = self.target_transform(img_gt)
             imgs_gt.append(img_gt.float())
-        return imgs, map_gt.float(), imgs_gt, frame
+        return imgs, ylabels, map_gt.float(), imgs_gt, frame
 
     def __len__(self):
         return len(self.map_gt.keys())
@@ -185,7 +191,7 @@ def test():
     plt.imshow(np.sum(np.stack(world_grid_maps), axis=0))
     plt.show()
     pass
-    imgs, map_gt, imgs_gt, _ = dataset.__getitem__(0)
+    imgs, ylabels, map_gt, imgs_gt, _ = dataset.__getitem__(0)
     pass
 
 

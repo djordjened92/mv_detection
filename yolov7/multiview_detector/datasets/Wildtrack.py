@@ -1,6 +1,7 @@
 import os
 import numpy as np
 import cv2
+import torch
 import xml.etree.ElementTree as ET
 import re
 from torchvision.datasets import VisionDataset
@@ -37,6 +38,39 @@ class Wildtrack(VisionDataset):
                 if frame in frame_range:
                     img_fpaths[cam][frame] = os.path.join(self.root, 'Image_subsets', camera_folder, fname)
         return img_fpaths
+
+    def get_yolo_labels(self, frame_range):
+        yolo_labels = {cam: {} for cam in range(self.num_cam)}
+        for camera_folder in sorted(os.listdir(os.path.join(self.root, 'Image_subsets'))):
+            cam = int(camera_folder[-1]) - 1
+            if cam >= self.num_cam:
+                continue
+            for fname in sorted(os.listdir(os.path.join(self.root, 'Image_subsets', camera_folder))):
+                frame = int(fname.split('.')[0])
+                if frame in frame_range:
+                    label_fname = f'{camera_folder}_{fname.split(".")[0]}.txt'
+                    label_fpath = os.path.join(self.root, 'yolo_anns', 'labels', label_fname)
+
+                    # Load label txt file
+                    with open(label_fpath, 'r') as f:
+                        labels = [x.split() for x in f.read().strip().splitlines()]
+                        labels = [(x[0], x[1], [0] + x[2:]) for x in labels] # split personID, positionID and yolo labels
+                        pID, pos, l = [list(x) for x in list(zip(*labels))]
+                        l = np.array(l, dtype=np.float32)
+
+                    nl = len(l)
+                    labels_out = torch.zeros((nl, 6))
+
+                    # Check label attributes
+                    if nl:
+                        assert l.shape[1] == 5, 'labels require 5 columns each'
+                        assert (l >= 0).all(), 'negative labels'
+                        assert (l[:, 1:] <= 1).all(), 'non-normalized or out of bounds coordinate labels'
+                        assert np.unique(l, axis=0).shape[0] == l.shape[0], 'duplicate labels'
+                        labels_out[:, 1:] = torch.from_numpy(l)
+
+                    yolo_labels[cam][frame] = labels_out
+        return yolo_labels
 
     def get_worldgrid_from_pos(self, pos):
         grid_x = pos % 480

@@ -1,6 +1,4 @@
-path: ''
-train: '/home/djordje/Documents/Projects/mv_detection/Wildtrack_dataset/yolo_anns/train.txt'
-val: '/home/djordje/Documents/Projects/mv_detection/Wildtrack_dataset/yolo_anns/val.txt'
+data_root: '/home/djordje/Documents/Projects/mv_detection/Wildtrack_dataset'
 
 # number of classes
 nc: 1
