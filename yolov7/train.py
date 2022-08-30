@@ -240,13 +240,12 @@ def train(hyp, opt, device, tb_writer=None):
         logger.info('Using SyncBatchNorm()')
 
     # MultiView dataset
-    base = Wildtrack(data_dict['data_root'])
-    normalize = T.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
-    h0, w0 = base.img_shape  # orig hw
+    base_set = Wildtrack(data_dict['data_root'])
+    h0, w0 = base_set.img_shape  # orig hw
     r = imgsz / max(h0, w0)  # resize image to img_size
     h, w = int(h0 * r), int(w0 * r)
-    train_trans = T.Compose([T.Resize([h, w]), T.ToTensor(), normalize, ])
-    train_set = frameDataset(base, train=True, transform=train_trans, grid_reduce=4)
+    train_trans = T.Compose([T.Resize([h, w]), T.ToTensor()])
+    train_set = frameDataset(base_set, train=True, transform=train_trans, grid_reduce=4)
     dataloader = torch.utils.data.DataLoader(train_set,
                                              batch_size=batch_size,
                                              shuffle=True,
@@ -258,7 +257,7 @@ def train(hyp, opt, device, tb_writer=None):
 
     # Process 0
     if rank in [-1, 0]:
-        test_set = frameDataset(base, train=False, transform=train_trans, grid_reduce=4)
+        test_set = frameDataset(base_set, train=False, transform=train_trans, grid_reduce=4)
         testloader = torch.utils.data.DataLoader(test_set,
                                                  batch_size=batch_size,
                                                  shuffle=True,
@@ -342,7 +341,7 @@ def train(hyp, opt, device, tb_writer=None):
         if rank in [-1, 0]:
             pbar = tqdm(pbar, total=nb)  # progress bar
         optimizer.zero_grad()
-        for i, (imgs, targets, _, _, _) in pbar:  # batch -------------------------------------------------------------
+        for i, (imgs, targets, _, _, paths) in pbar:  # batch -------------------------------------------------------------
             ni = i + nb * epoch  # number integrated batches (since train start)
             imgs = imgs.to(device, non_blocking=True).float() # uint8 to float32
 
@@ -367,8 +366,8 @@ def train(hyp, opt, device, tb_writer=None):
 
             # Forward
             with amp.autocast(enabled=cuda):
-                batch_tmp = imgs.shape[0] // 7
-                imgs_split = imgs.view(7, batch_tmp, *imgs.shape[1:])
+                batch_tmp = imgs.shape[0] // base_set.num_cam
+                imgs_split = imgs.view(base_set.num_cam, batch_tmp, *imgs.shape[1:])
                 pred = model(imgs_split)  # forward
                 if hyp['loss_ota'] == 1:
                     loss, loss_items = compute_loss_ota(pred[0], targets.to(device), imgs)  # loss scaled by batch_size
@@ -399,15 +398,15 @@ def train(hyp, opt, device, tb_writer=None):
                 pbar.set_description(s)
 
                 # Plot
-                # if plots and ni < 10:
-                #     f = save_dir / f'train_batch{ni}.jpg'  # filename
-                #     Thread(target=plot_images, args=(imgs, targets, paths, f), daemon=True).start()
-                #     # if tb_writer:
-                #     #     tb_writer.add_image(f, result, dataformats='HWC', global_step=epoch)
-                #     #     tb_writer.add_graph(torch.jit.trace(model, imgs, strict=False), [])  # add model graph
-                # elif plots and ni == 10 and wandb_logger.wandb:
-                #     wandb_logger.log({"Mosaics": [wandb_logger.wandb.Image(str(x), caption=x.name) for x in
-                #                                   save_dir.glob('train*.jpg') if x.exists()]})
+                if plots and ni < 10:
+                    f = save_dir / f'train_batch{ni}.jpg'  # filename
+                    Thread(target=plot_images, args=(imgs, targets, paths, f), daemon=True).start()
+                    # if tb_writer:
+                    #     tb_writer.add_image(f, result, dataformats='HWC', global_step=epoch)
+                    #     tb_writer.add_graph(torch.jit.trace(model, imgs, strict=False), [])  # add model graph
+                elif plots and ni == 10 and wandb_logger.wandb:
+                    wandb_logger.log({"Mosaics": [wandb_logger.wandb.Image(str(x), caption=x.name) for x in
+                                                  save_dir.glob('train*.jpg') if x.exists()]})
 
             # end batch ------------------------------------------------------------------------------------------------
         # end epoch ----------------------------------------------------------------------------------------------------
@@ -426,7 +425,7 @@ def train(hyp, opt, device, tb_writer=None):
                 results, maps, times = test.test(data_dict,
                                                  batch_size=batch_size * 2,
                                                  imgsz=imgsz_test,
-                                                 shapes = ((h0, w0), ((h / h0, w / w0), 0.)),
+                                                 shapes = ((h0, w0), ((h / h0, w / w0), (0., 0.))),
                                                  model=ema.ema,
                                                  single_cls=opt.single_cls,
                                                  dataloader=testloader,
@@ -435,7 +434,8 @@ def train(hyp, opt, device, tb_writer=None):
                                                  plots=plots and final_epoch,
                                                  wandb_logger=wandb_logger,
                                                  compute_loss=compute_loss,
-                                                 is_coco=is_coco)
+                                                 is_coco=is_coco,
+                                                 num_cam=base_set.num_cam)
 
             # Write
             with open(results_file, 'a') as f:

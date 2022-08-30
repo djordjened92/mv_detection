@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 from threading import Thread
+from itertools import chain
 
 import numpy as np
 import torch
@@ -22,9 +23,7 @@ def test(data,
          weights=None,
          batch_size=32,
          imgsz=640,
-         shapes=((640, 640), ((1., 1.), 0.)),
-         conf_thres=0.001,
-         iou_thres=0.6,  # for NMS
+         shapes=((640, 640), ((1., 1.), (0., 0.))),
          save_json=False,
          single_cls=False,
          verbose=False,
@@ -32,14 +31,14 @@ def test(data,
          dataloader=None,
          save_dir=Path(''),  # for saving images
          save_txt=False,  # for auto-labelling
-         save_hybrid=False,  # for hybrid auto-labelling
          save_conf=False,  # save auto-label confidences
          plots=True,
          wandb_logger=None,
          compute_loss=None,
          half_precision=True,
          trace=False,
-         is_coco=False):
+         is_coco=False,
+         num_cam=7):
     # Initialize/load model and set device
     training = model is not None
     if training:  # called by train.py
@@ -100,25 +99,26 @@ def test(data,
     for batch_i, (img, targets, _, _, paths) in enumerate(tqdm(dataloader, desc=s)):
         img = img.to(device, non_blocking=True)
         img = img.half() if half else img.float()  # uint8 to fp16/32
+
+        # Reshape input for forward pass
+        batch_tmp = img.shape[0] // num_cam
+        imgs_split = img.view(num_cam, batch_tmp, *img.shape[1:])
+
         targets = targets.to(device)
         nb, _, height, width = img.shape  # batch size, channels, height, width
 
         with torch.no_grad():
             # Run model
             t = time_synchronized()
-            out, train_out = model(img)  # inference and training outputs
+            train_out, nms_out, comb_matrices = model(imgs_split)  # inference and training outputs
             t0 += time_synchronized() - t
 
             # Compute loss
             if compute_loss:
                 loss += compute_loss([x.float() for x in train_out], targets)[1][:3]  # box, obj, cls
 
-            # Run NMS
             targets[:, 2:] *= torch.Tensor([width, height, width, height]).to(device)  # to pixels
-            lb = [targets[targets[:, 0] == i, 1:] for i in range(nb)] if save_hybrid else []  # for autolabelling
-            t = time_synchronized()
-            out = non_max_suppression(out, conf_thres=conf_thres, iou_thres=iou_thres, labels=lb, multi_label=True)
-            t1 += time_synchronized() - t
+            out = list(chain(*nms_out))
 
         # Statistics per image
         for si, pred in enumerate(out):
@@ -233,9 +233,9 @@ def test(data,
             print(pf % (names[c], seen, nt[c], p[i], r[i], ap50[i], ap[i]))
 
     # Print speeds
-    t = tuple(x / seen * 1E3 for x in (t0, t1, t0 + t1)) + (imgsz, imgsz, batch_size)  # tuple
+    t = (t0 / seen * 1E3, imgsz, imgsz, batch_size)  # tuple
     if not training:
-        print('Speed: %.1f/%.1f/%.1f ms inference/NMS/total per %gx%g image at batch-size %g' % t)
+        print('Speed: %.1f ms inference per %gx%g image at batch-size %g' % t)
 
     # Plots
     if plots:

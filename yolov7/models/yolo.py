@@ -606,7 +606,7 @@ class Model(nn.Module):
         for view in x:
             out = self.forward_once(view, profile)
             inference.append(out)
-            nms = non_max_suppression(out[0])
+            nms = non_max_suppression(out[0], conf_thres=0.001, iou_thres=0.6)
             inf_nms.append(nms)
 
         # Create outter product
