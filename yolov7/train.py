@@ -252,6 +252,10 @@ def train(hyp, opt, device, tb_writer=None):
                                              num_workers=opt.workers,
                                              pin_memory=True,
                                              collate_fn=frameDataset.collate_fn)
+    
+    model.upsample_shape = list(map(lambda x: int(x / train_set.img_reduce), train_set.img_shape))
+    model.reducedgrid_shape = train_set.reducedgrid_shape
+
     nb = len(dataloader)
     dataset_labels = [label for f, camd in train_set.yolo_labels.items() for cam, label in camd.items()]
 
@@ -368,11 +372,11 @@ def train(hyp, opt, device, tb_writer=None):
             with amp.autocast(enabled=cuda):
                 batch_tmp = imgs.shape[0] // base_set.num_cam
                 imgs_split = imgs.view(base_set.num_cam, batch_tmp, *imgs.shape[1:])
-                pred = model(imgs_split)  # forward
+                train_out, _, comb_matrices = model(imgs_split)  # forward
                 if hyp['loss_ota'] == 1:
-                    loss, loss_items = compute_loss_ota(pred[0], targets.to(device), imgs)  # loss scaled by batch_size
+                    loss, loss_items = compute_loss_ota(train_out, targets.to(device), imgs)  # loss scaled by batch_size
                 else:
-                    loss, loss_items = compute_loss(pred[0], targets.to(device))  # loss scaled by batch_size
+                    loss, loss_items = compute_loss(train_out, targets.to(device))  # loss scaled by batch_size
                 if rank != -1:
                     loss *= opt.world_size  # gradient averaged between devices in DDP mode
                 if opt.quad:
@@ -418,7 +422,7 @@ def train(hyp, opt, device, tb_writer=None):
         # DDP process 0 or single-GPU
         if rank in [-1, 0]:
             # mAP
-            ema.update_attr(model, include=['yaml', 'nc', 'hyp', 'gr', 'names', 'stride', 'class_weights'])
+            ema.update_attr(model, include=['yaml', 'nc', 'hyp', 'gr', 'names', 'stride', 'class_weights', 'upsample_shape', 'reducedgrid_shape'])
             final_epoch = epoch + 1 == epochs
             if not opt.notest or final_epoch:  # Calculate mAP
                 wandb_logger.current_epoch = epoch + 1

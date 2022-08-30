@@ -531,6 +531,10 @@ class Model(nn.Module):
         self.names = [str(i) for i in range(self.yaml['nc'])]  # default names
         # print([x.shape for x in self.forward(torch.zeros(1, ch, 64, 64))])
 
+        self.map_classifier = nn.Sequential(nn.Conv2d(1, 512, 3, padding=1), nn.ReLU(),
+                                            nn.Conv2d(512, 512, 3, padding=2, dilation=2), nn.ReLU(),
+                                            nn.Conv2d(512, 1, 3, padding=4, dilation=4, bias=False))
+
         # Build strides, anchors
         m = self.model[-1]  # Detect()
         if isinstance(m, Detect):
@@ -616,13 +620,18 @@ class Model(nn.Module):
             if len(nodes):
                 nodes = torch.cat(nodes, -1)
                 comb_matrix = torch.outer(nodes, nodes)
-                comb_matrices.append(comb_matrices)
+
+                # Process combination matrix and predict global map
+                comb_matrix = F.interpolate(comb_matrix[None, None], self.upsample_shape, mode='bilinear')
+                map_result = self.map_classifier(comb_matrix)
+                map_result = F.interpolate(map_result, self.reducedgrid_shape, mode='bilinear')
+                comb_matrices.append(map_result)
             else:
-                comb_matrices.append(None)
+                comb_matrices.append(torch.zeros((1, 1, *self.reducedgrid_shape), device=nodes.device))
 
         initial_preds = [torch.cat([out[1][i] for out in inference], 0) for i in range(3)]
 
-        return initial_preds, inf_nms, comb_matrices
+        return initial_preds, inf_nms, torch.cat(comb_matrices, 0)
             
 
     def forward_once(self, x, profile=False):
