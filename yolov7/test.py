@@ -110,7 +110,7 @@ def test(data,
         with torch.no_grad():
             # Run model
             t = time_synchronized()
-            train_out, nms_out, comb_matrices = model(imgs_split)  # inference and training outputs
+            train_out, nms_out, map_res = model(imgs_split)  # inference and training outputs
             t0 += time_synchronized() - t
 
             # Compute loss

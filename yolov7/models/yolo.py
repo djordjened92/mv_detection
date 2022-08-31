@@ -614,7 +614,7 @@ class Model(nn.Module):
             inf_nms.append(nms)
 
         # Create outter product
-        comb_matrices = []
+        map_results = []
         for view_boxes in zip(*inf_nms):
             nodes = [boxes[..., -1] for boxes in view_boxes if boxes.numel()]
             if len(nodes):
@@ -625,13 +625,13 @@ class Model(nn.Module):
                 comb_matrix = F.interpolate(comb_matrix[None, None], self.upsample_shape, mode='bilinear')
                 map_result = self.map_classifier(comb_matrix)
                 map_result = F.interpolate(map_result, self.reducedgrid_shape, mode='bilinear')
-                comb_matrices.append(map_result)
+                map_results.append(map_result)
             else:
-                comb_matrices.append(torch.zeros((1, 1, *self.reducedgrid_shape), device=nodes.device))
+                map_results.append(torch.zeros((1, 1, *self.reducedgrid_shape), device=nodes.device))
 
         initial_preds = [torch.cat([out[1][i] for out in inference], 0) for i in range(3)]
 
-        return initial_preds, inf_nms, torch.cat(comb_matrices, 0)
+        return initial_preds, inf_nms, torch.cat(map_results, 0)
             
 
     def forward_once(self, x, profile=False):

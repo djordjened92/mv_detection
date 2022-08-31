@@ -36,6 +36,7 @@ from utils.plots import plot_images, plot_labels, plot_results, plot_evolution
 from utils.torch_utils import ModelEMA, select_device, intersect_dicts, torch_distributed_zero_first, is_parallel
 from utils.wandb_logging.wandb_utils import WandbLogger, check_wandb_resume
 from multiview_detector.datasets import *
+from multiview_detector.loss.gaussian_mse import GaussianMSE
 
 logger = logging.getLogger(__name__)
 
@@ -255,6 +256,7 @@ def train(hyp, opt, device, tb_writer=None):
     
     model.upsample_shape = list(map(lambda x: int(x / train_set.img_reduce), train_set.img_shape))
     model.reducedgrid_shape = train_set.reducedgrid_shape
+    mv_criterion = GaussianMSE().cuda()
 
     nb = len(dataloader)
     dataset_labels = [label for f, camd in train_set.yolo_labels.items() for cam, label in camd.items()]
@@ -320,18 +322,18 @@ def train(hyp, opt, device, tb_writer=None):
         model.train()
 
         # Update image weights (optional)
-        if opt.image_weights:
-            # Generate indices
-            if rank in [-1, 0]:
-                cw = model.class_weights.cpu().numpy() * (1 - maps) ** 2 / nc  # class weights
-                iw = labels_to_image_weights(dataset_labels, nc=nc, class_weights=cw)  # image weights
-                dataset.indices = random.choices(range(dataset.n), weights=iw, k=dataset.n)  # rand weighted idx
-            # Broadcast if DDP
-            if rank != -1:
-                indices = (torch.tensor(dataset.indices) if rank == 0 else torch.zeros(dataset.n)).int()
-                dist.broadcast(indices, 0)
-                if rank != 0:
-                    dataset.indices = indices.cpu().numpy()
+        # if opt.image_weights:
+        #     # Generate indices
+        #     if rank in [-1, 0]:
+        #         cw = model.class_weights.cpu().numpy() * (1 - maps) ** 2 / nc  # class weights
+        #         iw = labels_to_image_weights(dataset_labels, nc=nc, class_weights=cw)  # image weights
+        #         dataset.indices = random.choices(range(dataset.n), weights=iw, k=dataset.n)  # rand weighted idx
+        #     # Broadcast if DDP
+        #     if rank != -1:
+        #         indices = (torch.tensor(dataset.indices) if rank == 0 else torch.zeros(dataset.n)).int()
+        #         dist.broadcast(indices, 0)
+        #         if rank != 0:
+        #             dataset.indices = indices.cpu().numpy()
 
         # Update mosaic border
         # b = int(random.uniform(0.25 * imgsz, 0.75 * imgsz + gs) // gs * gs)
@@ -341,11 +343,11 @@ def train(hyp, opt, device, tb_writer=None):
         if rank != -1:
             dataloader.sampler.set_epoch(epoch)
         pbar = enumerate(dataloader)
-        logger.info(('\n' + '%10s' * 8) % ('Epoch', 'gpu_mem', 'box', 'obj', 'cls', 'total', 'labels', 'img_size'))
+        logger.info(('\n' + '%10s' * 9) % ('Epoch', 'gpu_mem', 'box', 'obj', 'cls', 'total', 'mv_loss', 'labels', 'img_size'))
         if rank in [-1, 0]:
             pbar = tqdm(pbar, total=nb)  # progress bar
         optimizer.zero_grad()
-        for i, (imgs, targets, _, _, paths) in pbar:  # batch -------------------------------------------------------------
+        for i, (imgs, targets, map_gt, _, paths) in pbar:  # batch -------------------------------------------------------------
             ni = i + nb * epoch  # number integrated batches (since train start)
             imgs = imgs.to(device, non_blocking=True).float() # uint8 to float32
 
@@ -372,7 +374,7 @@ def train(hyp, opt, device, tb_writer=None):
             with amp.autocast(enabled=cuda):
                 batch_tmp = imgs.shape[0] // base_set.num_cam
                 imgs_split = imgs.view(base_set.num_cam, batch_tmp, *imgs.shape[1:])
-                train_out, _, comb_matrices = model(imgs_split)  # forward
+                train_out, _, map_res = model(imgs_split)  # forward
                 if hyp['loss_ota'] == 1:
                     loss, loss_items = compute_loss_ota(train_out, targets.to(device), imgs)  # loss scaled by batch_size
                 else:
@@ -382,8 +384,11 @@ def train(hyp, opt, device, tb_writer=None):
                 if opt.quad:
                     loss *= 4.
 
+                # Multivew loss
+                mv_loss = mv_criterion(map_res, map_gt.to(map_res.device), dataloader.dataset.map_kernel)
+
             # Backward
-            scaler.scale(loss).backward()
+            scaler.scale(loss + mv_loss).backward()
 
             # Optimize
             if ni % accumulate == 0:
@@ -396,9 +401,10 @@ def train(hyp, opt, device, tb_writer=None):
             # Print
             if rank in [-1, 0]:
                 mloss = (mloss * i + loss_items) / (i + 1)  # update mean losses
+                mmvloss = (mmvloss * i + mv_loss) / (i + 1)  # update mean losses
                 mem = '%.3gG' % (torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0)  # (GB)
-                s = ('%10s' * 2 + '%10.4g' * 6) % (
-                    '%g/%g' % (epoch, epochs - 1), mem, *mloss, targets.shape[0], imgs.shape[-1])
+                s = ('%10s' * 2 + '%10.4g' * 7) % (
+                    '%g/%g' % (epoch, epochs - 1), mem, *mloss, mmvloss, targets.shape[0], imgs.shape[-1])
                 pbar.set_description(s)
 
                 # Plot

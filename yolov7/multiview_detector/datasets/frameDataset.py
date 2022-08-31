@@ -162,9 +162,10 @@ class frameDataset(VisionDataset):
 
         ylabels_out = torch.cat(ylabels_out, 0)
         imgs_out = torch.cat(imgs, 0)
+        map_gts_out = torch.cat(map_gts, 0).unsqueeze(1)
         paths_out = [p for bp in paths for p in bp]
 
-        return imgs_out, ylabels_out, map_gts, frames, paths_out
+        return imgs_out, ylabels_out, map_gts_out, frames, paths_out
 
 
 def test():
