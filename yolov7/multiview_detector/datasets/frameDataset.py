@@ -164,8 +164,9 @@ class frameDataset(VisionDataset):
         imgs_out = torch.cat(imgs, 0)
         map_gts_out = torch.cat(map_gts, 0).unsqueeze(1)
         paths_out = [p for bp in paths for p in bp]
+        frames_out = torch.tensor(frames).unsqueeze(1)
 
-        return imgs_out, ylabels_out, map_gts_out, frames, paths_out
+        return imgs_out, ylabels_out, map_gts_out, frames_out, paths_out
 
 
 def test():

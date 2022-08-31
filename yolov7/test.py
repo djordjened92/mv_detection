@@ -17,6 +17,10 @@ from utils.general import coco80_to_coco91_class, check_dataset, check_file, che
 from utils.metrics import ap_per_class, ConfusionMatrix
 from utils.plots import plot_images, output_to_target, plot_study_txt
 from utils.torch_utils import select_device, time_synchronized, TracedModel
+from multiview_detector.utils.meters import AverageMeter
+from multiview_detector.loss.gaussian_mse import GaussianMSE
+from multiview_detector.evaluation.evaluate import evaluate
+from multiview_detector.utils.nms import nms
 
 
 def test(data,
@@ -28,6 +32,7 @@ def test(data,
          single_cls=False,
          verbose=False,
          model=None,
+         mv_cls_thres=0.,
          dataloader=None,
          save_dir=Path(''),  # for saving images
          save_txt=False,  # for auto-labelling
@@ -96,7 +101,12 @@ def test(data,
     p, r, f1, mp, mr, map50, map, t0, t1 = 0., 0., 0., 0., 0., 0., 0., 0., 0.
     loss = torch.zeros(3, device=device)
     jdict, stats, ap, ap_class, wandb_images = [], [], [], [], []
-    for batch_i, (img, targets, _, _, paths) in enumerate(tqdm(dataloader, desc=s)):
+
+    # Multiview metrices
+    mv_criterion = GaussianMSE().cuda()
+    mv_loss = 0
+    all_res_list = []
+    for batch_i, (img, targets, map_gt, frame, paths) in enumerate(tqdm(dataloader, desc=s)):
         img = img.to(device, non_blocking=True)
         img = img.half() if half else img.float()  # uint8 to fp16/32
 
@@ -113,14 +123,14 @@ def test(data,
             train_out, nms_out, map_res = model(imgs_split)  # inference and training outputs
             t0 += time_synchronized() - t
 
-            # Compute loss
+            # Compute yolo loss
             if compute_loss:
                 loss += compute_loss([x.float() for x in train_out], targets)[1][:3]  # box, obj, cls
 
             targets[:, 2:] *= torch.Tensor([width, height, width, height]).to(device)  # to pixels
             out = list(chain(*nms_out))
 
-        # Statistics per image
+        # Yolo statistics per image
         for si, pred in enumerate(out):
             labels = targets[targets[:, 0] == si, 1:]
             nl = len(labels)
@@ -206,6 +216,22 @@ def test(data,
             # Append statistics (correct, conf, pcls, tcls)
             stats.append((correct.cpu(), pred[:, 4].cpu(), pred[:, 5].cpu(), tcls))
 
+        # Multiview statistics per image
+        for i in range(batch_tmp):
+            map_grid_res = map_res[i].detach().cpu().squeeze()
+            v_s = map_grid_res[map_grid_res > mv_cls_thres].unsqueeze(1)
+            grid_ij = (map_grid_res > mv_cls_thres).nonzero()
+            if dataloader.dataset.base.indexing == 'xy':
+                grid_xy = grid_ij[:, [1, 0]]
+            else:
+                grid_xy = grid_ij
+
+            all_res_list.append(torch.cat([torch.ones_like(v_s) * frame[i],
+                                        grid_xy.float() * dataloader.dataset.grid_reduce,
+                                        v_s], dim=1))
+
+        mv_loss += mv_criterion(map_res, map_gt.to(map_res.device), dataloader.dataset.map_kernel).item()
+
         # Plot images
         if plots and batch_i < 3:
             f = save_dir / f'test_batch{batch_i}_labels.jpg'  # labels
@@ -222,10 +248,27 @@ def test(data,
         nt = np.bincount(stats[3].astype(np.int64), minlength=nc)  # number of targets per class
     else:
         nt = torch.zeros(1)
+    
+    # Multi view statistics
+    all_res_list = torch.cat(all_res_list, dim=0)
+    # np.savetxt('./all_res.txt', all_res_list.numpy(), '%.8f')
+    res_list = []
+    for frame in np.unique(all_res_list[:, 0]):
+        res = all_res_list[all_res_list[:, 0] == frame, :]
+        positions, scores = res[:, 1:3], res[:, 3]
+        ids, count = nms(positions, scores, 20, np.inf)
+        res_list.append(torch.cat([torch.ones([count, 1]) * frame, positions[ids[:count], :]], dim=1))
+    res_list = torch.cat(res_list, dim=0).numpy() if res_list else np.empty([0, 3])
+    np.savetxt('./mv_test.txt', res_list, '%d')
+
+    recall, precision, moda, modp = evaluate('./mv_test.txt', dataloader.dataset.gt_fpath,
+                                                dataloader.dataset.base.__name__)
 
     # Print results
     pf = '%20s' + '%12i' * 2 + '%12.3g' * 4  # print format
     print(pf % ('all', seen, nt.sum(), mp, mr, map50, map))
+    print('moda: {:.1f}%, modp: {:.1f}%, precision: {:.1f}%, recall: {:.1f}%'.
+          format(moda, modp, precision, recall))
 
     # Print results per class
     if (verbose or (nc < 50 and not training)) and nc > 1 and len(stats):
