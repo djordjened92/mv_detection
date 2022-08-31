@@ -32,7 +32,7 @@ def test(data,
          single_cls=False,
          verbose=False,
          model=None,
-         mv_cls_thres=0.,
+         mv_cls_thres=0.4,
          dataloader=None,
          save_dir=Path(''),  # for saving images
          save_txt=False,  # for auto-labelling
@@ -261,14 +261,14 @@ def test(data,
     res_list = torch.cat(res_list, dim=0).numpy() if res_list else np.empty([0, 3])
     np.savetxt('./mv_test.txt', res_list, '%d')
 
-    recall, precision, moda, modp = evaluate('./mv_test.txt', dataloader.dataset.gt_fpath,
+    mv_rec, mv_prec, moda, modp = evaluate('./mv_test.txt', dataloader.dataset.gt_fpath,
                                                 dataloader.dataset.base.__name__)
 
     # Print results
     pf = '%20s' + '%12i' * 2 + '%12.3g' * 4  # print format
     print(pf % ('all', seen, nt.sum(), mp, mr, map50, map))
-    print('moda: {:.1f}%, modp: {:.1f}%, precision: {:.1f}%, recall: {:.1f}%'.
-          format(moda, modp, precision, recall))
+    print('moda: {:.1f}%, modp: {:.1f}%, mv_prec: {:.1f}%, mv_rec: {:.1f}%'.
+          format(moda, modp, mv_prec, mv_rec))
 
     # Print results per class
     if (verbose or (nc < 50 and not training)) and nc > 1 and len(stats):
@@ -322,7 +322,7 @@ def test(data,
     maps = np.zeros(nc) + map
     for i, c in enumerate(ap_class):
         maps[c] = ap[i]
-    return (mp, mr, map50, map, *(loss.cpu() / len(dataloader)).tolist()), maps, t
+    return (mp, mr, map50, map, mv_rec, mv_prec, moda, modp, *(loss.cpu() / len(dataloader)).tolist(), mv_loss / len(dataloader)), maps, t
 
 
 if __name__ == '__main__':
