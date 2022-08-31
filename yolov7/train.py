@@ -39,7 +39,7 @@ from multiview_detector.datasets import *
 from multiview_detector.loss.gaussian_mse import GaussianMSE
 
 logger = logging.getLogger(__name__)
-
+torch.autograd.set_detect_anomaly(True)
 
 def train(hyp, opt, device, tb_writer=None):
     logger.info(colorstr('hyperparameters: ') + ', '.join(f'{k}={v}' for k, v in hyp.items()))
@@ -340,6 +340,7 @@ def train(hyp, opt, device, tb_writer=None):
         # dataset.mosaic_border = [b - imgsz, -b]  # height, width borders
 
         mloss = torch.zeros(4, device=device)  # mean losses
+        mmv_loss = 0.
         if rank != -1:
             dataloader.sampler.set_epoch(epoch)
         pbar = enumerate(dataloader)
@@ -401,10 +402,10 @@ def train(hyp, opt, device, tb_writer=None):
             # Print
             if rank in [-1, 0]:
                 mloss = (mloss * i + loss_items) / (i + 1)  # update mean losses
-                mmvloss = (mmvloss * i + mv_loss) / (i + 1)  # update mean losses
+                mmv_loss = (mmv_loss * i + mv_loss) / (i + 1)  # update mean losses
                 mem = '%.3gG' % (torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0)  # (GB)
                 s = ('%10s' * 2 + '%10.4g' * 7) % (
-                    '%g/%g' % (epoch, epochs - 1), mem, *mloss, mmvloss, targets.shape[0], imgs.shape[-1])
+                    '%g/%g' % (epoch, epochs - 1), mem, *mloss, mmv_loss, targets.shape[0], imgs.shape[-1])
                 pbar.set_description(s)
 
                 # Plot
