@@ -132,7 +132,7 @@ class IDetect(nn.Module):
                 if self.grid[i].shape[2:4] != x[i].shape[2:4]:
                     self.grid[i] = self._make_grid(nx, ny).to(x[i].device)
 
-                y = x[i].sigmoid()
+                y = torch.cat([x[i][..., :-1].sigmoid(), x[i][..., -1:]], -1)
                 y_out = y.clone()
                 y_out[..., 0:2] = (y_out[..., 0:2] * 2. - 0.5 + self.grid[i]) * self.stride[i]  # xy
                 y_out[..., 2:4] = (y_out[..., 2:4] * 2) ** 2 * self.anchor_grid[i]  # wh
@@ -534,7 +534,7 @@ class Model(nn.Module):
 
         self.map_classifier = nn.Sequential(nn.Conv2d(1, 512, 3, padding=1), nn.ReLU(),
                                             nn.Conv2d(512, 512, 3, padding=2, dilation=2), nn.ReLU(),
-                                            nn.Conv2d(512, 1, 3, padding=4, dilation=4, bias=False))
+                                            nn.Conv2d(512, 1, 3, padding=4, dilation=4, bias=False), nn.Sigmoid())
 
         # Build strides, anchors
         m = self.model[-1]  # Detect()
