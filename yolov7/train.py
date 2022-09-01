@@ -274,7 +274,7 @@ def train(hyp, opt, device, tb_writer=None):
         test_set = frameDataset(base_set, train=False, transform=test_trans, grid_reduce=4)
         testloader = torch.utils.data.DataLoader(test_set,
                                                  batch_size=batch_size,
-                                                 shuffle=True,
+                                                 shuffle=False,
                                                  num_workers=opt.workers,
                                                  pin_memory=True,
                                                  collate_fn=frameDataset.collate_fn)
@@ -397,7 +397,9 @@ def train(hyp, opt, device, tb_writer=None):
                 mv_loss = mv_criterion(map_res, map_gt.to(map_res.device), dataloader.dataset.map_kernel)
 
             # Backward
-            alpha = 0.5
+            alpha = 0
+            if epoch > 20:
+                alpha = 1
             scaler.scale(loss + alpha * mv_loss).backward()
 
             # Optimize

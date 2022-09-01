@@ -611,7 +611,7 @@ class Model(nn.Module):
         for view in x:
             out = self.forward_once(view, profile)
             inference.append(out)
-            nms = non_max_suppression(out[0], conf_thres=0.001, iou_thres=0.6)
+            nms = non_max_suppression(out[0], conf_thres=0.2, iou_thres=0.6)
             inf_nms.append(nms)
 
         # Create outter product
@@ -628,7 +628,7 @@ class Model(nn.Module):
                 map_result = F.interpolate(map_result, self.reducedgrid_shape, mode='bilinear')
                 map_results.append(map_result)
             else:
-                map_results.append(torch.zeros((1, 1, *self.reducedgrid_shape), device=nodes.device))
+                map_results.append(torch.zeros((1, 1, *self.reducedgrid_shape), device=x.device))
 
         initial_preds = [torch.cat([out[1][i] for out in inference], 0) for i in range(3)]
 
