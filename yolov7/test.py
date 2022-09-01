@@ -32,7 +32,7 @@ def test(data,
          single_cls=False,
          verbose=False,
          model=None,
-         mv_cls_thres=0.4,
+         mv_cls_thres=0.1,
          dataloader=None,
          save_dir=Path(''),  # for saving images
          save_txt=False,  # for auto-labelling
