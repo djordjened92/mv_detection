@@ -243,9 +243,16 @@ def train(hyp, opt, device, tb_writer=None):
     # MultiView dataset
     base_set = Wildtrack(data_dict['data_root'])
     h0, w0 = base_set.img_shape  # orig hw
-    r = imgsz / max(h0, w0)  # resize image to img_size
-    h, w = int(h0 * r), int(w0 * r)
-    train_trans = T.Compose([T.Resize([h, w]), T.ToTensor()])
+    if opt.rect:
+        r = imgsz / max(h0, w0)  # resize image to img_size
+        h, w = int(h0 * r), int(w0 * r)
+    else:
+        h, w = imgsz, imgsz
+    train_trans = T.Compose([T.ColorJitter(contrast=hyp['contrast'],
+                                           saturation=hyp['saturation'],
+                                           hue=hyp['hue']),
+                             T.Resize([h, w]),
+                             T.ToTensor()])
     train_set = frameDataset(base_set, train=True, transform=train_trans, grid_reduce=4)
     dataloader = torch.utils.data.DataLoader(train_set,
                                              batch_size=batch_size,
@@ -263,7 +270,8 @@ def train(hyp, opt, device, tb_writer=None):
 
     # Process 0
     if rank in [-1, 0]:
-        test_set = frameDataset(base_set, train=False, transform=train_trans, grid_reduce=4)
+        test_trans = T.Compose([T.Resize([h, w]), T.ToTensor()])
+        test_set = frameDataset(base_set, train=False, transform=test_trans, grid_reduce=4)
         testloader = torch.utils.data.DataLoader(test_set,
                                                  batch_size=batch_size,
                                                  shuffle=True,
@@ -389,7 +397,8 @@ def train(hyp, opt, device, tb_writer=None):
                 mv_loss = mv_criterion(map_res, map_gt.to(map_res.device), dataloader.dataset.map_kernel)
 
             # Backward
-            scaler.scale(loss + mv_loss).backward()
+            alpha = 0.5
+            scaler.scale(loss + alpha * mv_loss).backward()
 
             # Optimize
             if ni % accumulate == 0:
