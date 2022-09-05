@@ -532,9 +532,9 @@ class Model(nn.Module):
         self.names = [str(i) for i in range(self.yaml['nc'])]  # default names
         # print([x.shape for x in self.forward(torch.zeros(1, ch, 64, 64))])
 
-        self.map_classifier = nn.Sequential(nn.Conv2d(1, 512, 3, padding=1), nn.ReLU(),
+        self.map_classifier = nn.Sequential(nn.Conv2d(3, 512, 3, padding=1), nn.ReLU(),
                                             nn.Conv2d(512, 512, 3, padding=2, dilation=2), nn.ReLU(),
-                                            nn.Conv2d(512, 1, 3, padding=4, dilation=4, bias=False), nn.Sigmoid())
+                                            nn.Conv2d(512, 1, 3, padding=4, dilation=4, bias=False))
 
         # Build strides, anchors
         m = self.model[-1]  # Detect()
@@ -585,6 +585,17 @@ class Model(nn.Module):
         self.info()
         logger.info('')
 
+    def create_coord_map(self, img_size, with_r=False):
+        H, W, C = img_size
+        grid_x, grid_y = np.meshgrid(np.arange(W), np.arange(H))
+        grid_x = torch.from_numpy(grid_x / (W - 1) * 2 - 1).float()
+        grid_y = torch.from_numpy(grid_y / (H - 1) * 2 - 1).float()
+        ret = torch.stack([grid_x, grid_y], dim=0).unsqueeze(0)
+        if with_r:
+            rr = torch.sqrt(torch.pow(grid_x, 2) + torch.pow(grid_y, 2)).view([1, 1, H, W])
+            ret = torch.cat([ret, rr], dim=1)
+        return ret
+
     def forward_orig(self, x, augment=False, profile=False):
         if augment:
             img_size = x.shape[-2:]  # height, width
@@ -623,7 +634,8 @@ class Model(nn.Module):
                 comb_matrix = torch.outer(nodes, nodes)
 
                 # Process combination matrix and predict global map
-                comb_matrix = F.interpolate(comb_matrix[None, None], self.upsample_shape, mode='bilinear')
+                comb_matrix = F.interpolate(comb_matrix[None, None], self.reducedgrid_shape, mode='bilinear')
+                comb_matrix = torch.cat([comb_matrix, self.coord_map.to(x.device)], dim=1)
                 map_result = self.map_classifier(comb_matrix)
                 map_result = F.interpolate(map_result, self.reducedgrid_shape, mode='bilinear')
                 map_results.append(map_result)

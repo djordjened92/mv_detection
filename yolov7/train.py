@@ -104,8 +104,49 @@ def train(hyp, opt, device, tb_writer=None):
         if any(x in k for x in freeze):
             print('freezing %s' % k)
             v.requires_grad = False
+    
+    # Image sizes
+    gs = max(int(model.stride.max()), 32)  # grid size (max stride)
+    nl = model.model[-1].nl  # number of detection layers (used for scaling hyp['obj'])
+    imgsz, imgsz_test = [check_img_size(x, gs) for x in opt.img_size]  # verify imgsz are gs-multiples
+
+    # DP mode
+    if cuda and rank == -1 and torch.cuda.device_count() > 1:
+        model = torch.nn.DataParallel(model)
+
+    # SyncBatchNorm
+    if opt.sync_bn and cuda and rank != -1:
+        model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model).to(device)
+        logger.info('Using SyncBatchNorm()')
+
+    # MultiView dataset
+    base_set = Wildtrack(data_dict['data_root'])
+    h0, w0 = base_set.img_shape  # orig hw
+    if opt.rect:
+        r = imgsz / max(h0, w0)  # resize image to img_size
+        h, w = int(h0 * r), int(w0 * r)
+    else:
+        h, w = imgsz, imgsz
+    train_trans = T.Compose([T.ColorJitter(contrast=hyp['contrast'],
+                                           saturation=hyp['saturation'],
+                                           hue=hyp['hue']),
+                             T.Resize([h, w]),
+                             T.ToTensor()])
+    train_set = frameDataset(base_set, train=True, transform=train_trans, grid_reduce=4)
+    dataloader = torch.utils.data.DataLoader(train_set,
+                                             batch_size=batch_size,
+                                             shuffle=True,
+                                             num_workers=opt.workers,
+                                             pin_memory=True,
+                                             collate_fn=frameDataset.collate_fn)
+    
+    model.upsample_shape = list(map(lambda x: int(x / train_set.img_reduce), train_set.img_shape))
+    model.reducedgrid_shape = train_set.reducedgrid_shape
+    model.coord_map = model.create_coord_map(model.reducedgrid_shape + [1])
+    mv_criterion = GaussianMSE().cuda()
 
     # Optimizer
+    total_batch_size *= base_set.num_cam
     nbs = 64  # nominal batch size
     accumulate = max(round(nbs / total_batch_size), 1)  # accumulate loss before optimizing
     hyp['weight_decay'] *= total_batch_size * accumulate / nbs  # scale weight_decay
@@ -225,45 +266,6 @@ def train(hyp, opt, device, tb_writer=None):
             epochs += ckpt['epoch']  # finetune additional epochs
 
         del ckpt, state_dict
-
-    # Image sizes
-    gs = max(int(model.stride.max()), 32)  # grid size (max stride)
-    nl = model.model[-1].nl  # number of detection layers (used for scaling hyp['obj'])
-    imgsz, imgsz_test = [check_img_size(x, gs) for x in opt.img_size]  # verify imgsz are gs-multiples
-
-    # DP mode
-    if cuda and rank == -1 and torch.cuda.device_count() > 1:
-        model = torch.nn.DataParallel(model)
-
-    # SyncBatchNorm
-    if opt.sync_bn and cuda and rank != -1:
-        model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model).to(device)
-        logger.info('Using SyncBatchNorm()')
-
-    # MultiView dataset
-    base_set = Wildtrack(data_dict['data_root'])
-    h0, w0 = base_set.img_shape  # orig hw
-    if opt.rect:
-        r = imgsz / max(h0, w0)  # resize image to img_size
-        h, w = int(h0 * r), int(w0 * r)
-    else:
-        h, w = imgsz, imgsz
-    train_trans = T.Compose([T.ColorJitter(contrast=hyp['contrast'],
-                                           saturation=hyp['saturation'],
-                                           hue=hyp['hue']),
-                             T.Resize([h, w]),
-                             T.ToTensor()])
-    train_set = frameDataset(base_set, train=True, transform=train_trans, grid_reduce=4)
-    dataloader = torch.utils.data.DataLoader(train_set,
-                                             batch_size=batch_size,
-                                             shuffle=True,
-                                             num_workers=opt.workers,
-                                             pin_memory=True,
-                                             collate_fn=frameDataset.collate_fn)
-    
-    model.upsample_shape = list(map(lambda x: int(x / train_set.img_reduce), train_set.img_shape))
-    model.reducedgrid_shape = train_set.reducedgrid_shape
-    mv_criterion = GaussianMSE().cuda()
 
     nb = len(dataloader)
     dataset_labels = [label for f, camd in train_set.yolo_labels.items() for cam, label in camd.items()]
@@ -398,9 +400,9 @@ def train(hyp, opt, device, tb_writer=None):
 
             # Backward
             alpha = 0
-            if epoch > 20:
+            if epoch > 10:
                 alpha = 1
-            scaler.scale(loss + alpha * mv_loss).backward()
+            scaler.scale(loss + alpha * batch_tmp * mv_loss).backward()
 
             # Optimize
             if ni % accumulate == 0:
@@ -440,7 +442,7 @@ def train(hyp, opt, device, tb_writer=None):
         # DDP process 0 or single-GPU
         if rank in [-1, 0]:
             # mAP
-            ema.update_attr(model, include=['yaml', 'nc', 'hyp', 'gr', 'names', 'stride', 'class_weights', 'upsample_shape', 'reducedgrid_shape'])
+            ema.update_attr(model, include=['yaml', 'nc', 'hyp', 'gr', 'names', 'stride', 'class_weights', 'upsample_shape', 'reducedgrid_shape', 'coord_map'])
             final_epoch = epoch + 1 == epochs
             if not opt.notest or final_epoch:  # Calculate mAP
                 wandb_logger.current_epoch = epoch + 1
