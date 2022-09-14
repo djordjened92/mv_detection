@@ -532,9 +532,10 @@ class Model(nn.Module):
         self.names = [str(i) for i in range(self.yaml['nc'])]  # default names
         # print([x.shape for x in self.forward(torch.zeros(1, ch, 64, 64))])
 
-        self.map_classifier = nn.Sequential(nn.Conv2d(3, 512, 3, padding=1), nn.ReLU(),
-                                            nn.Conv2d(512, 512, 3, padding=2, dilation=2), nn.ReLU(),
-                                            nn.Conv2d(512, 1, 3, padding=4, dilation=4, bias=False))
+        self.map_classifier = nn.Sequential(nn.Conv2d(3, 32, 3, padding=1), nn.ReLU(),
+                                            nn.Conv2d(32, 256, 3, padding=1), nn.ReLU(),
+                                            nn.Conv2d(256, 512, 3, padding=2, dilation=2), nn.ReLU(),
+                                            nn.Conv2d(512, 1, 3, padding=4, dilation=4))
 
         # Build strides, anchors
         m = self.model[-1]  # Detect()
@@ -622,22 +623,21 @@ class Model(nn.Module):
         for view in x:
             out = self.forward_once(view, profile)
             inference.append(out)
-            nms = non_max_suppression(out[0], conf_thres=0.2, iou_thres=0.6)
+            nms = non_max_suppression(out[0], conf_thres=0.2, iou_thres=0.8)
             inf_nms.append(nms)
 
         # Create outter product
         map_results = []
         for view_boxes in zip(*inf_nms):
-            nodes = [boxes[..., -1] for boxes in view_boxes if boxes.numel()]
+            view_boxes = torch.cat([boxes for boxes in view_boxes if boxes.numel()], 0) #concatenate all boxes from all views
+            sort_idx = torch.argsort(view_boxes, 0) # get indices of sorting over all nodes
+            nodes = view_boxes[..., -1]*view_boxes[..., 4].detach() # calculate map nodes
             if len(nodes):
-                nodes = torch.cat(nodes, -1)
-                comb_matrix = torch.outer(nodes, nodes)
-
+                comb_matrix = torch.outer(nodes[sort_idx[:,1]], nodes[sort_idx[:,0]]) # outer product of nodes sorted by y and then by x axis
                 # Process combination matrix and predict global map
                 comb_matrix = F.interpolate(comb_matrix[None, None], self.reducedgrid_shape, mode='bilinear')
                 comb_matrix = torch.cat([comb_matrix, self.coord_map.to(x.device)], dim=1)
                 map_result = self.map_classifier(comb_matrix)
-                map_result = F.interpolate(map_result, self.reducedgrid_shape, mode='bilinear')
                 map_results.append(map_result)
             else:
                 map_results.append(torch.zeros((1, 1, *self.reducedgrid_shape), device=x.device))

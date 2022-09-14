@@ -217,6 +217,8 @@ def test(data,
             stats.append((correct.cpu(), pred[:, 4].cpu(), pred[:, 5].cpu(), tcls))
 
         # Multiview statistics per image
+        mv_loss += mv_criterion(map_res, map_gt.to(map_res.device), dataloader.dataset.map_kernel).item()
+        map_res = map_res.sigmoid()
         for i in range(batch_tmp):
             map_grid_res = map_res[i].detach().cpu().squeeze()
             v_s = map_grid_res[map_grid_res > mv_cls_thres].unsqueeze(1)
@@ -229,8 +231,6 @@ def test(data,
             all_res_list.append(torch.cat([torch.ones_like(v_s) * frame[i],
                                         grid_xy.float() * dataloader.dataset.grid_reduce,
                                         v_s], dim=1))
-
-        mv_loss += mv_criterion(map_res, map_gt.to(map_res.device), dataloader.dataset.map_kernel).item()
 
         # Plot images
         if plots and batch_i < 3:

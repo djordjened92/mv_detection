@@ -2,16 +2,19 @@ import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F
+from utils.loss import FocalLoss
 
 
 class GaussianMSE(nn.Module):
 
     def __init__(self):
         super().__init__()
+        self.BCEcls = nn.BCEWithLogitsLoss(reduction='sum')
+        self.focal = FocalLoss(self.BCEcls, 10., 0.99)
 
     def forward(self, x, target, kernel):
-        target = self._traget_transform(x, target, kernel)
-        return F.mse_loss(x, target)
+        loss = self.focal(x, target)
+        return loss
 
     def _traget_transform(self, x, target, kernel):
         target = F.adaptive_max_pool2d(target, x.shape[2:])
