@@ -27,6 +27,8 @@ def main(opt):
                                      device=opt.device,
                                      weights=opt.weights,
                                      batch_size=opt.batch_size,
+                                     mv_cls_thres=opt.mv_cls_thres,
+                                     mv_nms_top_k=opt.mv_nms_top_k,
                                      imgsz=opt.img_size,
                                      shapes = ((h0, w0), ((h / h0, w / w0), (0., 0.))),
                                      dataloader=testloader,
@@ -43,6 +45,8 @@ if __name__ == '__main__':
     parser.add_argument('--batch-size', type=int, default=1, help='size of each image batch')
     parser.add_argument('--workers', type=int, default=8, help='maximum number of dataloader workers')
     parser.add_argument('--device', default='0', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
+    parser.add_argument('--mv-cls-thres', type=float, default=0.4)
+    parser.add_argument('--mv-nms-top-k', type=int, default=50)
     opt = parser.parse_args()
     main(opt)
 
@@ -50,5 +54,7 @@ if __name__ == '__main__':
 python evaluate.py \
 --data data/data.yaml \
 --weights /home/djordje/Documents/Projects/mv_detection/yolov7/runs/train/yolov7-tiny-mv_008/weights/last.pt \
---img-size 832
+--img-size 832 \
+--mv-cls-thres 0.4 \
+--mv-nms-top-k 50
 '''

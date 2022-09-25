@@ -44,7 +44,8 @@ def test(data,
          half_precision=False,
          trace=False,
          is_coco=False,
-         num_cam=7):
+         num_cam=7,
+         mv_nms_top_k=50):
     # Initialize/load model and set device
     training = model is not None
     if training:  # called by train.py
@@ -250,7 +251,7 @@ def test(data,
     for frame in np.unique(all_res_list[:, 0]):
         res = all_res_list[all_res_list[:, 0] == frame, :]
         positions, scores = res[:, 1:3], res[:, 3]
-        ids, count = nms(positions, scores, 20)
+        ids, count = nms(positions, scores, 20, top_k=mv_nms_top_k)
         res_list.append(torch.cat([torch.ones([count, 1]) * frame, positions[ids[:count], :]], dim=1))
     res_list = torch.cat(res_list, dim=0).numpy() if res_list else np.empty([0, 3])
     np.savetxt('./mv_test.txt', res_list, '%d')
