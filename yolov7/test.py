@@ -24,6 +24,7 @@ from multiview_detector.utils.nms import nms
 
 
 def test(data,
+         device=None,
          weights=None,
          batch_size=32,
          imgsz=640,
@@ -32,7 +33,7 @@ def test(data,
          single_cls=False,
          verbose=False,
          model=None,
-         mv_cls_thres=0.05,
+         mv_cls_thres=0.4,
          dataloader=None,
          save_dir=Path(''),  # for saving images
          save_txt=False,  # for auto-labelling
@@ -51,11 +52,11 @@ def test(data,
 
     else:  # called directly
         set_logging()
-        device = select_device(opt.device, batch_size=batch_size)
+        device = select_device(device, batch_size=batch_size)
 
         # Directories
-        save_dir = Path(increment_path(Path(opt.project) / opt.name, exist_ok=opt.exist_ok))  # increment run
-        (save_dir / 'labels' if save_txt else save_dir).mkdir(parents=True, exist_ok=True)  # make dir
+        # save_dir = Path(increment_path(Path(opt.project) / opt.name, exist_ok=opt.exist_ok))  # increment run
+        # (save_dir / 'labels' if save_txt else save_dir).mkdir(parents=True, exist_ok=True)  # make dir
 
         # Load model
         model = attempt_load(weights, map_location=device)  # load FP32 model
@@ -85,13 +86,6 @@ def test(data,
     log_imgs = 0
     if wandb_logger and wandb_logger.wandb:
         log_imgs = min(wandb_logger.log_imgs, 100)
-    # Dataloader
-    if not training:
-        if device.type != 'cpu':
-            model(torch.zeros(1, 3, imgsz, imgsz).to(device).type_as(next(model.parameters())))  # run once
-        task = opt.task if opt.task in ('train', 'val', 'test') else 'val'  # path to train/val/test images
-        dataloader = create_dataloader(data[task], imgsz, batch_size, gs, opt, pad=0.5, rect=True,
-                                       prefix=colorstr(f'{task}: '))[0]
 
     seen = 0
     confusion_matrix = ConfusionMatrix(nc=nc)
@@ -256,7 +250,7 @@ def test(data,
     for frame in np.unique(all_res_list[:, 0]):
         res = all_res_list[all_res_list[:, 0] == frame, :]
         positions, scores = res[:, 1:3], res[:, 3]
-        ids, count = nms(positions, scores, 20, np.inf)
+        ids, count = nms(positions, scores, 20)
         res_list.append(torch.cat([torch.ones([count, 1]) * frame, positions[ids[:count], :]], dim=1))
     res_list = torch.cat(res_list, dim=0).numpy() if res_list else np.empty([0, 3])
     np.savetxt('./mv_test.txt', res_list, '%d')
