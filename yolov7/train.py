@@ -142,6 +142,7 @@ def train(hyp, opt, device, tb_writer=None):
     
     model.upsample_shape = list(map(lambda x: int(x / train_set.img_reduce), train_set.img_shape))
     model.reducedgrid_shape = train_set.reducedgrid_shape
+    model.map_linear_trans = nn.Linear(train_set.reducedgrid_shape[-1], train_set.reducedgrid_shape[-1], device=device)
     model.coord_map = model.create_coord_map(model.reducedgrid_shape + [1])
     mv_criterion = GaussianMSE().cuda()
 
@@ -400,9 +401,10 @@ def train(hyp, opt, device, tb_writer=None):
 
             # Backward
             alpha = 0
-            if epoch > 10:
-                alpha = 1
-            scaler.scale(loss + alpha * batch_tmp * mv_loss).backward()
+            if epoch > 5:
+                alpha = 0.2
+            scaler.scale(loss + alpha * mv_loss).backward()
+            # torch.nn.utils.clip_grad_norm(model.parameters(), 2.)
 
             # Optimize
             if ni % accumulate == 0:

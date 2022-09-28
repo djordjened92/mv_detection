@@ -32,7 +32,8 @@ def main(opt):
                                      imgsz=opt.img_size,
                                      shapes = ((h0, w0), ((h / h0, w / w0), (0., 0.))),
                                      dataloader=testloader,
-                                     num_cam=base_set.num_cam)
+                                     num_cam=base_set.num_cam,
+                                     plots=False)
 
     # print(f'precision, recall, mAP_0.5, mAP_0.5:0.95, mv_rec, mv_prec, moda, modp, box_loss, obj_loss, cls_loss, mv_loss')
     # print(results)
@@ -55,6 +56,6 @@ python evaluate.py \
 --data data/data.yaml \
 --weights /home/djordje/Documents/Projects/mv_detection/yolov7/runs/train/yolov7-tiny-mv_008/weights/last.pt \
 --img-size 832 \
---mv-cls-thres 0.4 \
---mv-nms-top-k 50
+--mv-cls-thres 0.53 \
+--mv-nms-top-k 200
 '''

@@ -534,7 +534,8 @@ class Model(nn.Module):
 
         self.map_classifier = nn.Sequential(nn.Conv2d(3, 32, 3, padding=1), nn.ReLU(),
                                             nn.Conv2d(32, 256, 3, padding=1), nn.ReLU(),
-                                            nn.Conv2d(256, 512, 3, padding=2, dilation=2), nn.ReLU(),
+                                            nn.Conv2d(256, 512, 3, padding='same'), nn.ReLU(),
+                                            nn.Conv2d(512, 512, 3, padding='same'), nn.ReLU(),
                                             nn.Conv2d(512, 1, 3, padding=4, dilation=4))
 
         # Build strides, anchors
@@ -629,13 +630,22 @@ class Model(nn.Module):
         # Create outter product
         map_results = []
         for view_boxes in zip(*inf_nms):
-            view_boxes = torch.cat([boxes for boxes in view_boxes if boxes.numel()], 0) #concatenate all boxes from all views
-            sort_idx = torch.argsort(view_boxes, 0) # get indices of sorting over all nodes
-            nodes = view_boxes[..., -1]*view_boxes[..., 4].detach() # calculate map nodes
-            if len(nodes):
-                comb_matrix = torch.outer(nodes[sort_idx[:,1]], nodes[sort_idx[:,0]]) # outer product of nodes sorted by y and then by x axis
+            nodes_h = []
+            nodes_v = []
+            for boxes in view_boxes:
+                if boxes.numel():
+                    nodes = boxes[..., -1]*boxes[..., 4].detach() 
+                    sort_idx = torch.argsort(boxes, 0)
+                    nodes_h.append(nodes[sort_idx[:,0]])
+                    nodes_v.append(nodes[sort_idx[:,1]])
+
+            if len(nodes_h):
+                nodes_h = torch.cat(nodes_h, -1)
+                nodes_v = torch.cat(nodes_v, -1)
+                comb_matrix = torch.outer(nodes_v, nodes_h) # outer product of nodes sorted by y and then by x axis
                 # Process combination matrix and predict global map
                 comb_matrix = F.interpolate(comb_matrix[None, None], self.reducedgrid_shape, mode='bilinear')
+                comb_matrix = self.map_linear_trans(comb_matrix)
                 comb_matrix = torch.cat([comb_matrix, self.coord_map.to(x.device)], dim=1)
                 map_result = self.map_classifier(comb_matrix)
                 map_results.append(map_result)

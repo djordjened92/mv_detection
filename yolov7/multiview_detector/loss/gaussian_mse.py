@@ -10,7 +10,7 @@ class GaussianMSE(nn.Module):
     def __init__(self):
         super().__init__()
         self.BCEcls = nn.BCEWithLogitsLoss(reduction='sum')
-        self.focal = FocalLoss(self.BCEcls, 10., 0.99)
+        self.focal = FocalLoss(self.BCEcls, 10., 0.999)
 
     def forward(self, x, target, kernel):
         loss = self.focal(x, target)
