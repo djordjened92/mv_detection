@@ -9,7 +9,8 @@ Copy-paste from torch.nn.Transformer with modifications:
 """
 import copy
 from typing import Optional
-
+import math
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn, Tensor
@@ -93,27 +94,27 @@ def create_pos_embedding(img_size, num_pos_feats=64, temperature=10000, normaliz
     return pos
 
 class TransformerWorldFeat(nn.Module):
-    def __init__(self, num_cam, Rworld_shape, base_dim, hidden_dim=128, dropout=0.1, nhead=8, dim_feedforward=512):
+    def __init__(self, Rworld_shape, base_dim, hidden_dim=128, dropout=0.1, nhead=8, dim_feedforward=512):
         super(TransformerWorldFeat, self).__init__()
-        self.downsample = nn.Sequential(nn.Conv2d(base_dim * num_cam, hidden_dim, 3, 2, 1), nn.ReLU(),
-                                        nn.Conv2d(hidden_dim, hidden_dim, 3, 2, 1), nn.ReLU(), )
+        self.downsample = nn.Sequential(nn.Conv2d(base_dim, hidden_dim, 3, 2, 1), nn.ReLU(),
+                                        nn.Conv2d(hidden_dim, hidden_dim, 3, 2, 1), nn.ReLU())
 
         self.pos_embedding = create_pos_embedding(np.ceil(np.array(Rworld_shape) / 4).astype(int),
                                                   hidden_dim // 2)
         encoder_layer = TransformerEncoderLayer(d_model=hidden_dim, dropout=dropout, nhead=nhead,
                                                 dim_feedforward=dim_feedforward)
-        self.encoder = TransformerEncoder(encoder_layer, 3)
+        self.encoder = TransformerEncoder(encoder_layer, 1)
 
         self.upsample = nn.Sequential(nn.Upsample(np.ceil(np.array(Rworld_shape) / 2).astype(int).tolist(),
                                                   mode='bilinear'),
                                       nn.Conv2d(hidden_dim, hidden_dim, 3, 1, 1), nn.ReLU(),
                                       nn.Upsample(Rworld_shape, mode='bilinear'),
-                                      nn.Conv2d(hidden_dim, hidden_dim, 3, 1, 1), nn.ReLU(), )
+                                      nn.Conv2d(hidden_dim, hidden_dim, 3, 1, 1), nn.ReLU())
 
-    def forward(self, x, visualize=False):
-        B, N, C, H, W = x.shape
+    def forward(self, x):
+        B, C, H, W = x.shape
         # _, _, H, W = x2.shape
-        x = self.downsample(x.view(B, N * C, H, W))
+        x = self.downsample(x.view(B, C, H, W))
         _, _, H, W = x.shape
         # H*W,B,C*N
         pos_embedding = self.pos_embedding.repeat(B, 1, 1, 1).flatten(2).permute(2, 0, 1).to(x.device)

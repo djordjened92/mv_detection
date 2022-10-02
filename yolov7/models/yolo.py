@@ -638,7 +638,9 @@ class Model(nn.Module):
                 comb_matrix = torch.outer(nodes_v, nodes_h) # outer product of nodes sorted by y and then by x axis
                 # Process combination matrix and predict global map
                 comb_matrix = F.interpolate(comb_matrix[None, None], self.reducedgrid_shape, mode='bilinear')
-                map_result = self.world_feat(comb_matrix)
+                map_result = self.bottleneck(comb_matrix)
+                map_result = self.world_feat(map_result)
+                map_result = self.output_head(map_result)
                 map_results.append(map_result)
             else:
                 map_results.append(torch.zeros((1, 1, *self.reducedgrid_shape), device=x.device))

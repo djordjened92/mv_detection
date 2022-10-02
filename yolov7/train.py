@@ -141,10 +141,12 @@ def train(hyp, opt, device, tb_writer=None):
                                              pin_memory=True,
                                              collate_fn=frameDataset.collate_fn)
     
-    model.upsample_shape = list(map(lambda x: int(x / train_set.img_reduce), train_set.img_shape))
     model.reducedgrid_shape = train_set.reducedgrid_shape
-    model.world_feat = TransformerWorldFeat(base_set.num_cam, train_set.reducedgrid_shape, 1)
-    mv_criterion = GaussianMSE().cuda()
+    hidden_dim = 128
+    model.bottleneck = nn.Sequential(nn.Conv2d(1, hidden_dim, 1), nn.Dropout2d(hyp['dropout2D'])).to(device)
+    model.world_feat = TransformerWorldFeat(train_set.reducedgrid_shape, base_dim=hidden_dim, hidden_dim=hidden_dim).to(device)
+    model.output_head = nn.Conv2d(hidden_dim, 1, 1).to(device)
+    mv_criterion = GaussianMSE().to(device)
 
     # Optimizer
     total_batch_size *= base_set.num_cam
