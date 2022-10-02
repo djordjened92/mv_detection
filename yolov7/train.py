@@ -140,14 +140,14 @@ def train(hyp, opt, device, tb_writer=None):
                                              pin_memory=True,
                                              collate_fn=frameDataset.collate_fn)
     
-    model.upsample_shape = list(map(lambda x: int(x / train_set.img_reduce), train_set.img_shape))
     model.reducedgrid_shape = train_set.reducedgrid_shape
+    model.norm1 = nn.LayerNorm([1, *train_set.reducedgrid_shape], device=device)
+    model.norm2 = nn.LayerNorm([1, *train_set.reducedgrid_shape], device=device)
     model.map_linear_trans = nn.Sequential(nn.Linear(train_set.reducedgrid_shape[-1], train_set.reducedgrid_shape[-1], device=device),
                                            nn.ReLU(),
-                                           nn.Dropout(hyp['dropout2D']),
+                                           nn.Dropout2d(hyp['dropout2D']),
                                            nn.Linear(train_set.reducedgrid_shape[-1], train_set.reducedgrid_shape[-1], device=device),
-                                           nn.Dropout(hyp['dropout2D']))
-    model.coord_map = model.create_coord_map(model.reducedgrid_shape + [1])
+                                           nn.Dropout2d(hyp['dropout2D']))
     mv_criterion = GaussianMSE().cuda()
 
     # Optimizer
