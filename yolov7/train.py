@@ -36,6 +36,7 @@ from utils.plots import plot_images, plot_labels, plot_results, plot_evolution
 from utils.torch_utils import ModelEMA, select_device, intersect_dicts, torch_distributed_zero_first, is_parallel
 from utils.wandb_logging.wandb_utils import WandbLogger, check_wandb_resume
 from multiview_detector.datasets import *
+from multiview_detector.models.transformer import TransformerWorldFeat
 from multiview_detector.loss.gaussian_mse import GaussianMSE
 
 logger = logging.getLogger(__name__)
@@ -142,12 +143,7 @@ def train(hyp, opt, device, tb_writer=None):
     
     model.upsample_shape = list(map(lambda x: int(x / train_set.img_reduce), train_set.img_shape))
     model.reducedgrid_shape = train_set.reducedgrid_shape
-    model.map_linear_trans = nn.Sequential(nn.Linear(train_set.reducedgrid_shape[-1], train_set.reducedgrid_shape[-1], device=device),
-                                           nn.ReLU(),
-                                           nn.Dropout(hyp['dropout2D']),
-                                           nn.Linear(train_set.reducedgrid_shape[-1], train_set.reducedgrid_shape[-1], device=device),
-                                           nn.Dropout(hyp['dropout2D']))
-    model.coord_map = model.create_coord_map(model.reducedgrid_shape + [1])
+    model.world_feat = TransformerWorldFeat(base_set.num_cam, train_set.reducedgrid_shape, 1)
     mv_criterion = GaussianMSE().cuda()
 
     # Optimizer
