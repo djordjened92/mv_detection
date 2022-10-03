@@ -648,7 +648,7 @@ class Model(nn.Module):
                 comb_matrix = self.norm1(comb_matrix)
                 comb_matrix_trans = self.map_linear_trans(comb_matrix)
                 comb_matrix += comb_matrix_trans
-                comb_matrix = self.norm1(comb_matrix)
+                comb_matrix = self.norm2(comb_matrix)
                 map_result = self.map_classifier(comb_matrix)
                 map_results.append(map_result)
             else:
