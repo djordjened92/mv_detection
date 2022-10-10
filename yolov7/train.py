@@ -142,8 +142,8 @@ def train(hyp, opt, device, tb_writer=None):
                                              collate_fn=frameDataset.collate_fn)
     
     model.reducedgrid_shape = train_set.reducedgrid_shape
-    hidden_dim = 128
-    model.bottleneck = nn.Sequential(nn.Conv2d(1, hidden_dim, 1), nn.Dropout2d(hyp['dropout2D'])).to(device)
+    hidden_dim = 256
+    model.bottleneck = nn.Sequential(nn.Conv2d(1, hidden_dim, 1), nn.Dropout(hyp['dropout2D'])).to(device)
     model.world_feat = TransformerWorldFeat(train_set.reducedgrid_shape, base_dim=hidden_dim, hidden_dim=hidden_dim).to(device)
     model.output_head = nn.Conv2d(hidden_dim, 1, 1).to(device)
     mv_criterion = GaussianMSE().to(device)
@@ -404,8 +404,8 @@ def train(hyp, opt, device, tb_writer=None):
             # Backward
             alpha = 0
             beta = 1
-            if epoch > 5:
-                alpha = 0.1
+            if epoch > 1:
+                alpha = 1.0
             if epoch > 20:
                 beta = 0.5
             scaler.scale(beta * loss + alpha * mv_loss).backward()

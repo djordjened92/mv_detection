@@ -103,7 +103,7 @@ class TransformerWorldFeat(nn.Module):
                                                   hidden_dim // 2)
         encoder_layer = TransformerEncoderLayer(d_model=hidden_dim, dropout=dropout, nhead=nhead,
                                                 dim_feedforward=dim_feedforward)
-        self.encoder = TransformerEncoder(encoder_layer, 1)
+        self.encoder = TransformerEncoder(encoder_layer, 3)
 
         self.upsample = nn.Sequential(nn.Upsample(np.ceil(np.array(Rworld_shape) / 2).astype(int).tolist(),
                                                   mode='bilinear'),
