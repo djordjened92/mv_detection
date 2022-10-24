@@ -13,6 +13,7 @@ class GaussianMSE(nn.Module):
         self.focal = FocalLoss(self.BCEcls, 10., 0.999)
 
     def forward(self, x, target, kernel):
+        #target = self._traget_transform(x, target, kernel)
         loss = self.focal(x, target)
         return loss
 

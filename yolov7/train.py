@@ -140,14 +140,31 @@ def train(hyp, opt, device, tb_writer=None):
                                              pin_memory=True,
                                              collate_fn=frameDataset.collate_fn)
     
-    model.reducedgrid_shape = train_set.reducedgrid_shape
-    model.norm1 = nn.LayerNorm([1, *train_set.reducedgrid_shape], device=device)
-    model.norm2 = nn.LayerNorm([1, *train_set.reducedgrid_shape], device=device)
-    model.map_linear_trans = nn.Sequential(nn.Linear(train_set.reducedgrid_shape[-1], train_set.reducedgrid_shape[-1], device=device),
+    model.reducedgrid_shape = torch.tensor(train_set.reducedgrid_shape)
+    model.map_linear_trans1 = nn.Sequential(nn.Linear(torch.div(model.reducedgrid_shape[-1], 3, rounding_mode='floor'), torch.div(model.reducedgrid_shape[-1], 2, rounding_mode='floor'), device=device),
                                            nn.ReLU(),
-                                           nn.Dropout2d(hyp['dropout2D']),
-                                           nn.Linear(train_set.reducedgrid_shape[-1], train_set.reducedgrid_shape[-1], device=device),
-                                           nn.Dropout2d(hyp['dropout2D']))
+                                           nn.Linear(torch.div(model.reducedgrid_shape[-1], 2, rounding_mode='floor'), torch.div(model.reducedgrid_shape[-1], 2, rounding_mode='floor'), device=device),
+                                           nn.Dropout(hyp['dropout2D']))
+    model.map_linear_trans2 = nn.Sequential(nn.Linear(torch.div(model.reducedgrid_shape[0], 3, rounding_mode='floor'), torch.div(model.reducedgrid_shape[0], 2, rounding_mode='floor'), device=device),
+                                           nn.ReLU(),
+                                           nn.Linear(torch.div(model.reducedgrid_shape[0], 2, rounding_mode='floor'), torch.div(model.reducedgrid_shape[0], 2, rounding_mode='floor'), device=device),
+                                           nn.Dropout(hyp['dropout2D']))
+    model.map_linear_trans3 = nn.Sequential(nn.Linear(torch.div(model.reducedgrid_shape[-1], 2, rounding_mode='floor'), model.reducedgrid_shape[-1], device=device),
+                                           nn.ReLU(),
+                                           nn.Linear(model.reducedgrid_shape[-1], model.reducedgrid_shape[-1], device=device),
+                                           nn.Dropout(hyp['dropout2D']))
+    model.map_linear_trans4 = nn.Sequential(nn.Linear(torch.div(model.reducedgrid_shape[0], 2, rounding_mode='floor'), model.reducedgrid_shape[0], device=device),
+                                           nn.ReLU(),
+                                           nn.Linear(model.reducedgrid_shape[0], model.reducedgrid_shape[0], device=device),
+                                           nn.Dropout(hyp['dropout2D']))
+    model.map_linear_trans5 = nn.Sequential(nn.Linear(model.reducedgrid_shape[1], model.reducedgrid_shape[1], device=device),
+                                           nn.ReLU(),
+                                           nn.Linear(model.reducedgrid_shape[1], model.reducedgrid_shape[1], device=device),
+                                           nn.Dropout(hyp['dropout2D']))
+    model.map_linear_trans6 = nn.Sequential(nn.Linear(model.reducedgrid_shape[1], model.reducedgrid_shape[1], device=device),
+                                           nn.ReLU(),
+                                           nn.Linear(model.reducedgrid_shape[1], model.reducedgrid_shape[1], device=device),
+                                           nn.Dropout(hyp['dropout2D']))
     mv_criterion = GaussianMSE().cuda()
 
     # Optimizer
@@ -246,6 +263,7 @@ def train(hyp, opt, device, tb_writer=None):
 
     # Resume
     start_epoch, best_fitness = 0, 0.0
+    '''
     if pretrained:
         # Optimizer
         if ckpt['optimizer'] is not None:
@@ -271,7 +289,7 @@ def train(hyp, opt, device, tb_writer=None):
             epochs += ckpt['epoch']  # finetune additional epochs
 
         del ckpt, state_dict
-
+    '''
     nb = len(dataloader)
     dataset_labels = [label for f, camd in train_set.yolo_labels.items() for cam, label in camd.items()]
 
@@ -406,11 +424,10 @@ def train(hyp, opt, device, tb_writer=None):
             # Backward
             alpha = 0
             beta = 1
-            if epoch > 5:
-                alpha = 0.1
-            if epoch > 20:
-                beta = 0.5
-            scaler.scale(beta * loss + alpha * mv_loss).backward()
+            # if epoch > 5:
+            #     beta = 0.5
+
+            scaler.scale(loss).backward()
             # torch.nn.utils.clip_grad_norm(model.parameters(), 2.)
 
             # Optimize
@@ -466,7 +483,7 @@ def train(hyp, opt, device, tb_writer=None):
                                                  verbose=nc < 50 and final_epoch,
                                                  plots=plots and final_epoch,
                                                  wandb_logger=wandb_logger,
-                                                 compute_loss=compute_loss,
+                                                 compute_loss=compute_loss_ota,
                                                  is_coco=is_coco,
                                                  num_cam=base_set.num_cam)
 

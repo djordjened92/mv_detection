@@ -534,8 +534,8 @@ class Model(nn.Module):
 
         self.map_classifier = nn.Sequential(nn.Conv2d(1, 32, 3, padding=1), nn.ReLU(),
                                             nn.Conv2d(32, 256, 3, padding=1), nn.ReLU(),
-                                            nn.Conv2d(256, 512, 3, padding='same'), nn.ReLU(),
-                                            nn.Conv2d(512, 512, 3, padding='same'), nn.ReLU(),
+                                            # nn.Conv2d(256, 512, 3, padding='same'), nn.ReLU(),
+                                            nn.Conv2d(256, 512, 3, padding=1), nn.ReLU(),
                                             nn.Conv2d(512, 1, 3, padding=4, dilation=4))
 
         # Build strides, anchors
@@ -630,25 +630,30 @@ class Model(nn.Module):
         # Create outter product
         map_results = []
         for view_boxes in zip(*inf_nms):
-            nodes_h = []
-            nodes_v = []
+            # nodes_h = []
+            # nodes_v = []
+            nodes = []
             for boxes in view_boxes:
                 if boxes.numel():
-                    nodes = boxes[..., -1]*boxes[..., 4].detach() 
-                    sort_idx = torch.argsort(boxes, 0)
-                    nodes_h.append(nodes[sort_idx[:,0]])
-                    nodes_v.append(nodes[sort_idx[:,1]])
+                    # nodes = boxes[..., -1]*boxes[..., 4].detach()
+                    center_euc = torch.norm(boxes[..., :2].detach(), dim=1)
+                    nodes.append(center_euc)
+                    # sort_idx = torch.argsort(boxes, 0)
+                    # nodes_h.append(nodes[sort_idx[:,0]])
+                    # nodes_v.append(nodes[sort_idx[:,1]])
 
-            if len(nodes_h):
-                nodes_h = torch.cat(nodes_h, -1)
-                nodes_v = torch.cat(nodes_v, -1)
-                comb_matrix = torch.outer(nodes_v, nodes_h) # outer product of nodes sorted by y and then by x axis
+            if len(nodes):
+                nodes = torch.cat(nodes, -1)
+                comb_matrix = torch.outer(nodes, nodes) # outer product of nodes sorted by y and then by x axis
                 # Process combination matrix and predict global map
-                comb_matrix = F.interpolate(comb_matrix[None, None], self.reducedgrid_shape, mode='bilinear')
-                comb_matrix = self.norm1(comb_matrix)
-                comb_matrix_trans = self.map_linear_trans(comb_matrix)
-                comb_matrix += comb_matrix_trans
-                comb_matrix = self.norm2(comb_matrix)
+                comb_matrix = F.interpolate(comb_matrix[None, None], torch.div(self.reducedgrid_shape, 3, rounding_mode='floor').tolist(), mode='bilinear')
+                comb_matrix = self.map_linear_trans1(comb_matrix)
+                comb_matrix = self.map_linear_trans2(torch.transpose(comb_matrix, -2, -1))
+                comb_matrix = self.map_linear_trans3(torch.transpose(comb_matrix, -2, -1))
+                comb_matrix = self.map_linear_trans4(torch.transpose(comb_matrix, -2, -1))
+                comb_matrix = torch.transpose(comb_matrix, -2, -1)
+                comb_matrix += self.map_linear_trans5(comb_matrix)
+                comb_matrix += self.map_linear_trans6(comb_matrix)
                 map_result = self.map_classifier(comb_matrix)
                 map_results.append(map_result)
             else:
