@@ -426,7 +426,7 @@ def train(hyp, opt, device, tb_writer=None):
             beta = 1
             # if epoch > 5:
             #     beta = 0.5
-
+            scaler.scale(mv_loss).backward()
             scaler.scale(loss).backward()
             # torch.nn.utils.clip_grad_norm(model.parameters(), 2.)
 

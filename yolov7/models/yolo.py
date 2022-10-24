@@ -1,4 +1,5 @@
 import argparse
+from importlib.metadata import requires
 import logging
 import sys
 from copy import deepcopy
@@ -621,6 +622,7 @@ class Model(nn.Module):
     def forward(self, x, profile=False):
         inference = []
         inf_nms = []
+        img_size = x.shape[-2:] # height, width
         for view in x:
             out = self.forward_once(view, profile)
             inference.append(out)
@@ -636,7 +638,7 @@ class Model(nn.Module):
             for boxes in view_boxes:
                 if boxes.numel():
                     # nodes = boxes[..., -1]*boxes[..., 4].detach()
-                    center_euc = torch.norm(boxes[..., :2].detach(), dim=1)
+                    center_euc = torch.norm(boxes[..., :2].detach() / torch.tensor([img_size[1], img_size[0]], device=x.device), dim=1)
                     nodes.append(center_euc)
                     # sort_idx = torch.argsort(boxes, 0)
                     # nodes_h.append(nodes[sort_idx[:,0]])
