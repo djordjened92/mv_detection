@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 from threading import Thread
+from itertools import chain
 
 import numpy as np
 import torch
@@ -16,30 +17,35 @@ from utils.general import coco80_to_coco91_class, check_dataset, check_file, che
 from utils.metrics import ap_per_class, ConfusionMatrix
 from utils.plots import plot_images, output_to_target, plot_study_txt
 from utils.torch_utils import select_device, time_synchronized, TracedModel
+from multiview_detector.utils.meters import AverageMeter
+from multiview_detector.loss.gaussian_mse import GaussianMSE
+from multiview_detector.evaluation.evaluate import evaluate
+from multiview_detector.utils.nms import nms
 
 
 def test(data,
+         device=None,
          weights=None,
          batch_size=32,
          imgsz=640,
-         conf_thres=0.001,
-         iou_thres=0.6,  # for NMS
+         shapes=((640, 640), ((1., 1.), (0., 0.))),
          save_json=False,
          single_cls=False,
-         augment=False,
          verbose=False,
          model=None,
+         mv_cls_thres=0.4,
          dataloader=None,
          save_dir=Path(''),  # for saving images
          save_txt=False,  # for auto-labelling
-         save_hybrid=False,  # for hybrid auto-labelling
          save_conf=False,  # save auto-label confidences
          plots=True,
          wandb_logger=None,
          compute_loss=None,
-         half_precision=True,
+         half_precision=False,
          trace=False,
-         is_coco=False):
+         is_coco=False,
+         num_cam=7,
+         mv_nms_top_k=50):
     # Initialize/load model and set device
     training = model is not None
     if training:  # called by train.py
@@ -47,11 +53,11 @@ def test(data,
 
     else:  # called directly
         set_logging()
-        device = select_device(opt.device, batch_size=batch_size)
+        device = select_device(device, batch_size=batch_size)
 
         # Directories
-        save_dir = Path(increment_path(Path(opt.project) / opt.name, exist_ok=opt.exist_ok))  # increment run
-        (save_dir / 'labels' if save_txt else save_dir).mkdir(parents=True, exist_ok=True)  # make dir
+        # save_dir = Path(increment_path(Path(opt.project) / opt.name, exist_ok=opt.exist_ok))  # increment run
+        # (save_dir / 'labels' if save_txt else save_dir).mkdir(parents=True, exist_ok=True)  # make dir
 
         # Load model
         model = attempt_load(weights, map_location=device)  # load FP32 model
@@ -72,7 +78,7 @@ def test(data,
         is_coco = data.endswith('coco.yaml')
         with open(data) as f:
             data = yaml.load(f, Loader=yaml.SafeLoader)
-    check_dataset(data)  # check
+
     nc = 1 if single_cls else int(data['nc'])  # number of classes
     iouv = torch.linspace(0.5, 0.95, 10).to(device)  # iou vector for mAP@0.5:0.95
     niou = iouv.numel()
@@ -81,13 +87,6 @@ def test(data,
     log_imgs = 0
     if wandb_logger and wandb_logger.wandb:
         log_imgs = min(wandb_logger.log_imgs, 100)
-    # Dataloader
-    if not training:
-        if device.type != 'cpu':
-            model(torch.zeros(1, 3, imgsz, imgsz).to(device).type_as(next(model.parameters())))  # run once
-        task = opt.task if opt.task in ('train', 'val', 'test') else 'val'  # path to train/val/test images
-        dataloader = create_dataloader(data[task], imgsz, batch_size, gs, opt, pad=0.5, rect=True,
-                                       prefix=colorstr(f'{task}: '))[0]
 
     seen = 0
     confusion_matrix = ConfusionMatrix(nc=nc)
@@ -97,31 +96,36 @@ def test(data,
     p, r, f1, mp, mr, map50, map, t0, t1 = 0., 0., 0., 0., 0., 0., 0., 0., 0.
     loss = torch.zeros(3, device=device)
     jdict, stats, ap, ap_class, wandb_images = [], [], [], [], []
-    for batch_i, (img, targets, paths, shapes) in enumerate(tqdm(dataloader, desc=s)):
+
+    # Multiview metrices
+    mv_criterion = GaussianMSE().cuda()
+    mv_loss = 0
+    all_res_list = []
+    for batch_i, (img, targets, map_gt, frame, paths) in enumerate(tqdm(dataloader, desc=s)):
         img = img.to(device, non_blocking=True)
         img = img.half() if half else img.float()  # uint8 to fp16/32
-        img /= 255.0  # 0 - 255 to 0.0 - 1.0
+
+        # Reshape input for forward pass
+        batch_tmp = img.shape[0] // num_cam
+        imgs_split = img.view(num_cam, batch_tmp, *img.shape[1:])
+
         targets = targets.to(device)
         nb, _, height, width = img.shape  # batch size, channels, height, width
 
         with torch.no_grad():
             # Run model
             t = time_synchronized()
-            out, train_out = model(img, augment=augment)  # inference and training outputs
+            train_out, nms_out, map_res = model(imgs_split)  # inference and training outputs
             t0 += time_synchronized() - t
 
-            # Compute loss
+            # Compute yolo loss
             if compute_loss:
-                loss += compute_loss([x.float() for x in train_out], targets)[1][:3]  # box, obj, cls
+                loss += compute_loss([x.float() for x in train_out], targets, img)[1][:3]  # box, obj, cls
 
-            # Run NMS
             targets[:, 2:] *= torch.Tensor([width, height, width, height]).to(device)  # to pixels
-            lb = [targets[targets[:, 0] == i, 1:] for i in range(nb)] if save_hybrid else []  # for autolabelling
-            t = time_synchronized()
-            out = non_max_suppression(out, conf_thres=conf_thres, iou_thres=iou_thres, labels=lb, multi_label=True)
-            t1 += time_synchronized() - t
+            out = list(chain(*nms_out))
 
-        # Statistics per image
+        # Yolo statistics per image
         for si, pred in enumerate(out):
             labels = targets[targets[:, 0] == si, 1:]
             nl = len(labels)
@@ -136,11 +140,11 @@ def test(data,
 
             # Predictions
             predn = pred.clone()
-            scale_coords(img[si].shape[1:], predn[:, :4], shapes[si][0], shapes[si][1])  # native-space pred
+            scale_coords(img[si].shape[1:], predn[:, :4], shapes[0], shapes[1])  # native-space pred
 
             # Append to text file
             if save_txt:
-                gn = torch.tensor(shapes[si][0])[[1, 0, 1, 0]]  # normalization gain whwh
+                gn = torch.tensor(shapes[0])[[1, 0, 1, 0]]  # normalization gain whwh
                 for *xyxy, conf, cls in predn.tolist():
                     xywh = (xyxy2xywh(torch.tensor(xyxy).view(1, 4)) / gn).view(-1).tolist()  # normalized xywh
                     line = (cls, *xywh, conf) if save_conf else (cls, *xywh)  # label format
@@ -179,7 +183,7 @@ def test(data,
 
                 # target boxes
                 tbox = xywh2xyxy(labels[:, 1:5])
-                scale_coords(img[si].shape[1:], tbox, shapes[si][0], shapes[si][1])  # native-space labels
+                scale_coords(img[si].shape[1:], tbox, shapes[0], shapes[1])  # native-space labels
                 if plots:
                     confusion_matrix.process_batch(predn, torch.cat((labels[:, 0:1], tbox), 1))
 
@@ -207,6 +211,22 @@ def test(data,
             # Append statistics (correct, conf, pcls, tcls)
             stats.append((correct.cpu(), pred[:, 4].cpu(), pred[:, 5].cpu(), tcls))
 
+        # Multiview statistics per image
+        mv_loss += mv_criterion(map_res, map_gt.to(map_res.device), dataloader.dataset.map_kernel).item()
+        map_res = map_res.sigmoid()
+        for i in range(batch_tmp):
+            map_grid_res = map_res[i].detach().cpu().squeeze()
+            v_s = map_grid_res[map_grid_res > mv_cls_thres].unsqueeze(1)
+            grid_ij = (map_grid_res > mv_cls_thres).nonzero()
+            if dataloader.dataset.base.indexing == 'xy':
+                grid_xy = grid_ij[:, [1, 0]]
+            else:
+                grid_xy = grid_ij
+
+            all_res_list.append(torch.cat([torch.ones_like(v_s) * frame[i],
+                                        grid_xy.float() * dataloader.dataset.grid_reduce,
+                                        v_s], dim=1))
+
         # Plot images
         if plots and batch_i < 3:
             f = save_dir / f'test_batch{batch_i}_labels.jpg'  # labels
@@ -223,10 +243,27 @@ def test(data,
         nt = np.bincount(stats[3].astype(np.int64), minlength=nc)  # number of targets per class
     else:
         nt = torch.zeros(1)
+    
+    # Multi view statistics
+    all_res_list = torch.cat(all_res_list, dim=0)
+    # np.savetxt('./all_res.txt', all_res_list.numpy(), '%.8f')
+    res_list = []
+    for frame in np.unique(all_res_list[:, 0]):
+        res = all_res_list[all_res_list[:, 0] == frame, :]
+        positions, scores = res[:, 1:3], res[:, 3]
+        ids, count = nms(positions, scores, 20, top_k=mv_nms_top_k)
+        res_list.append(torch.cat([torch.ones([count, 1]) * frame, positions[ids[:count], :]], dim=1))
+    res_list = torch.cat(res_list, dim=0).numpy() if res_list else np.empty([0, 3])
+    np.savetxt('./mv_test.txt', res_list, '%d')
+
+    mv_rec, mv_prec, moda, modp = evaluate('./mv_test.txt', dataloader.dataset.gt_fpath,
+                                                dataloader.dataset.base.__name__)
 
     # Print results
     pf = '%20s' + '%12i' * 2 + '%12.3g' * 4  # print format
     print(pf % ('all', seen, nt.sum(), mp, mr, map50, map))
+    print('moda: {:.1f}%, modp: {:.1f}%, mv_prec: {:.1f}%, mv_rec: {:.1f}%'.
+          format(moda, modp, mv_prec, mv_rec))
 
     # Print results per class
     if (verbose or (nc < 50 and not training)) and nc > 1 and len(stats):
@@ -234,9 +271,9 @@ def test(data,
             print(pf % (names[c], seen, nt[c], p[i], r[i], ap50[i], ap[i]))
 
     # Print speeds
-    t = tuple(x / seen * 1E3 for x in (t0, t1, t0 + t1)) + (imgsz, imgsz, batch_size)  # tuple
+    t = (t0 / seen * 1E3, imgsz, imgsz, batch_size)  # tuple
     if not training:
-        print('Speed: %.1f/%.1f/%.1f ms inference/NMS/total per %gx%g image at batch-size %g' % t)
+        print('Speed: %.1f ms inference per %gx%g image at batch-size %g' % t)
 
     # Plots
     if plots:
@@ -280,7 +317,7 @@ def test(data,
     maps = np.zeros(nc) + map
     for i, c in enumerate(ap_class):
         maps[c] = ap[i]
-    return (mp, mr, map50, map, *(loss.cpu() / len(dataloader)).tolist()), maps, t
+    return (mp, mr, map50, map, mv_rec, mv_prec, moda, modp, *(loss.cpu() / len(dataloader)).tolist(), mv_loss / len(dataloader)), maps, t
 
 
 if __name__ == '__main__':

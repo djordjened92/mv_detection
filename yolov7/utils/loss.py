@@ -673,7 +673,6 @@ class ComputeLossOTA:
             all_anch = []
             
             for i, pi in enumerate(p):
-                
                 b, a, gj, gi = indices[i]
                 idx = (b == batch_idx)
                 b, a, gj, gi = b[idx], a[idx], gj[idx], gi[idx]                

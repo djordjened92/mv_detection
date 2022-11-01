@@ -2,6 +2,7 @@ import argparse
 import logging
 import math
 import os
+import cv2
 import random
 import time
 from copy import deepcopy
@@ -15,6 +16,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 import torch.optim.lr_scheduler as lr_scheduler
 import torch.utils.data
+import torchvision.transforms as T
 import yaml
 from torch.cuda import amp
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -34,9 +36,11 @@ from utils.loss import ComputeLoss, ComputeLossOTA
 from utils.plots import plot_images, plot_labels, plot_results, plot_evolution
 from utils.torch_utils import ModelEMA, select_device, intersect_dicts, torch_distributed_zero_first, is_parallel
 from utils.wandb_logging.wandb_utils import WandbLogger, check_wandb_resume
+from multiview_detector.datasets import *
+from multiview_detector.loss.gaussian_mse import GaussianMSE
 
 logger = logging.getLogger(__name__)
-
+torch.autograd.set_detect_anomaly(True)
 
 def train(hyp, opt, device, tb_writer=None):
     logger.info(colorstr('hyperparameters: ') + ', '.join(f'{k}={v}' for k, v in hyp.items()))
@@ -93,20 +97,83 @@ def train(hyp, opt, device, tb_writer=None):
         logger.info('Transferred %g/%g items from %s' % (len(state_dict), len(model.state_dict()), weights))  # report
     else:
         model = Model(opt.cfg, ch=3, nc=nc, anchors=hyp.get('anchors')).to(device)  # create
-    with torch_distributed_zero_first(rank):
-        check_dataset(data_dict)  # check
-    train_path = data_dict['train']
-    test_path = data_dict['val']
 
     # Freeze
-    freeze = [f'model.{x}.' for x in (freeze if len(freeze) > 1 else range(freeze[0]))]  # parameter names to freeze (full or partial)
+    # freeze = [f'model.{x}.' for x in (freeze if len(freeze) > 1 else range(freeze[0]))]  # parameter names to freeze (full or partial)
+    # for k, v in model.named_parameters():
+    #     v.requires_grad = True  # train all layers
+    #     if any(x in k for x in freeze):
+    #         print('freezing %s' % k)
+    #         v.requires_grad = False
+    
+    # Freeze whole yolo model
     for k, v in model.named_parameters():
-        v.requires_grad = True  # train all layers
-        if any(x in k for x in freeze):
-            print('freezing %s' % k)
-            v.requires_grad = False
+        v.requires_grad = False
+
+    # Image sizes
+    gs = max(int(model.stride.max()), 32)  # grid size (max stride)
+    nl = model.model[-1].nl  # number of detection layers (used for scaling hyp['obj'])
+    imgsz, imgsz_test = [check_img_size(x, gs) for x in opt.img_size]  # verify imgsz are gs-multiples
+
+    # DP mode
+    if cuda and rank == -1 and torch.cuda.device_count() > 1:
+        model = torch.nn.DataParallel(model)
+
+    # SyncBatchNorm
+    if opt.sync_bn and cuda and rank != -1:
+        model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model).to(device)
+        logger.info('Using SyncBatchNorm()')
+
+    # MultiView dataset
+    base_set = Wildtrack(data_dict['data_root'])
+    h0, w0 = base_set.img_shape  # orig hw
+    if opt.rect:
+        r = imgsz / max(h0, w0)  # resize image to img_size
+        h, w = int(h0 * r), int(w0 * r)
+    else:
+        h, w = imgsz, imgsz
+    train_trans = T.Compose([T.ColorJitter(contrast=hyp['contrast'],
+                                           saturation=hyp['saturation'],
+                                           hue=hyp['hue']),
+                             lambda x: cv2.resize(np.array(x), (w, h), interpolation=cv2.INTER_LINEAR),
+                             T.ToTensor()])
+    train_set = frameDataset(base_set, train=True, transform=train_trans, grid_reduce=4)
+    dataloader = torch.utils.data.DataLoader(train_set,
+                                             batch_size=batch_size,
+                                             shuffle=True,
+                                             num_workers=opt.workers,
+                                             pin_memory=True,
+                                             collate_fn=frameDataset.collate_fn)
+    
+    model.reducedgrid_shape = torch.tensor(train_set.reducedgrid_shape)
+    model.map_linear_trans1 = nn.Sequential(nn.Linear(torch.div(model.reducedgrid_shape[-1], 3, rounding_mode='floor'), torch.div(model.reducedgrid_shape[-1], 2, rounding_mode='floor'), device=device),
+                                           nn.ReLU(),
+                                           nn.Linear(torch.div(model.reducedgrid_shape[-1], 2, rounding_mode='floor'), torch.div(model.reducedgrid_shape[-1], 2, rounding_mode='floor'), device=device),
+                                           nn.Dropout(hyp['dropout2D']))
+    model.map_linear_trans2 = nn.Sequential(nn.Linear(torch.div(model.reducedgrid_shape[0], 3, rounding_mode='floor'), torch.div(model.reducedgrid_shape[0], 2, rounding_mode='floor'), device=device),
+                                           nn.ReLU(),
+                                           nn.Linear(torch.div(model.reducedgrid_shape[0], 2, rounding_mode='floor'), torch.div(model.reducedgrid_shape[0], 2, rounding_mode='floor'), device=device),
+                                           nn.Dropout(hyp['dropout2D']))
+    model.map_linear_trans3 = nn.Sequential(nn.Linear(torch.div(model.reducedgrid_shape[-1], 2, rounding_mode='floor'), model.reducedgrid_shape[-1], device=device),
+                                           nn.ReLU(),
+                                           nn.Linear(model.reducedgrid_shape[-1], model.reducedgrid_shape[-1], device=device),
+                                           nn.Dropout(hyp['dropout2D']))
+    model.map_linear_trans4 = nn.Sequential(nn.Linear(torch.div(model.reducedgrid_shape[0], 2, rounding_mode='floor'), model.reducedgrid_shape[0], device=device),
+                                           nn.ReLU(),
+                                           nn.Linear(model.reducedgrid_shape[0], model.reducedgrid_shape[0], device=device),
+                                           nn.Dropout(hyp['dropout2D']))
+    model.map_linear_trans5 = nn.Sequential(nn.Linear(model.reducedgrid_shape[1], model.reducedgrid_shape[1], device=device),
+                                           nn.ReLU(),
+                                           nn.Linear(model.reducedgrid_shape[1], model.reducedgrid_shape[1], device=device),
+                                           nn.Dropout(hyp['dropout2D']))
+    model.map_linear_trans6 = nn.Sequential(nn.Linear(model.reducedgrid_shape[1], model.reducedgrid_shape[1], device=device),
+                                           nn.ReLU(),
+                                           nn.Linear(model.reducedgrid_shape[1], model.reducedgrid_shape[1], device=device),
+                                           nn.Dropout(hyp['dropout2D']))
+    mv_criterion = GaussianMSE().cuda()
 
     # Optimizer
+    total_batch_size *= base_set.num_cam
     nbs = 64  # nominal batch size
     accumulate = max(round(nbs / total_batch_size), 1)  # accumulate loss before optimizing
     hyp['weight_decay'] *= total_batch_size * accumulate / nbs  # scale weight_decay
@@ -197,10 +264,11 @@ def train(hyp, opt, device, tb_writer=None):
     # plot_lr_scheduler(optimizer, scheduler, epochs)
 
     # EMA
-    ema = ModelEMA(model) if rank in [-1, 0] else None
+    ema = None
 
     # Resume
     start_epoch, best_fitness = 0, 0.0
+    '''
     if pretrained:
         # Optimizer
         if ckpt['optimizer'] is not None:
@@ -226,39 +294,23 @@ def train(hyp, opt, device, tb_writer=None):
             epochs += ckpt['epoch']  # finetune additional epochs
 
         del ckpt, state_dict
-
-    # Image sizes
-    gs = max(int(model.stride.max()), 32)  # grid size (max stride)
-    nl = model.model[-1].nl  # number of detection layers (used for scaling hyp['obj'])
-    imgsz, imgsz_test = [check_img_size(x, gs) for x in opt.img_size]  # verify imgsz are gs-multiples
-
-    # DP mode
-    if cuda and rank == -1 and torch.cuda.device_count() > 1:
-        model = torch.nn.DataParallel(model)
-
-    # SyncBatchNorm
-    if opt.sync_bn and cuda and rank != -1:
-        model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model).to(device)
-        logger.info('Using SyncBatchNorm()')
-
-    # Trainloader
-    dataloader, dataset = create_dataloader(train_path, imgsz, batch_size, gs, opt,
-                                            hyp=hyp, augment=True, cache=opt.cache_images, rect=opt.rect, rank=rank,
-                                            world_size=opt.world_size, workers=opt.workers,
-                                            image_weights=opt.image_weights, quad=opt.quad, prefix=colorstr('train: '))
-    mlc = np.concatenate(dataset.labels, 0)[:, 0].max()  # max label class
-    nb = len(dataloader)  # number of batches
-    assert mlc < nc, 'Label class %g exceeds nc=%g in %s. Possible class labels are 0-%g' % (mlc, nc, opt.data, nc - 1)
+    '''
+    nb = len(dataloader)
+    dataset_labels = [label for f, camd in train_set.yolo_labels.items() for cam, label in camd.items()]
 
     # Process 0
     if rank in [-1, 0]:
-        testloader = create_dataloader(test_path, imgsz_test, batch_size * 2, gs, opt,  # testloader
-                                       hyp=hyp, cache=opt.cache_images and not opt.notest, rect=False, rank=-1,
-                                       world_size=opt.world_size, workers=opt.workers,
-                                       pad=0.5, prefix=colorstr('val: '))[0]
+        test_trans = T.Compose([lambda x: cv2.resize(np.array(x), (w, h), interpolation=cv2.INTER_LINEAR), T.ToTensor()])
+        test_set = frameDataset(base_set, train=False, transform=test_trans, grid_reduce=4)
+        testloader = torch.utils.data.DataLoader(test_set,
+                                                 batch_size=batch_size,
+                                                 shuffle=False,
+                                                 num_workers=opt.workers,
+                                                 pin_memory=True,
+                                                 collate_fn=frameDataset.collate_fn)
 
         if not opt.resume:
-            labels = np.concatenate(dataset.labels, 0)
+            labels = np.concatenate(dataset_labels, 0)
             c = torch.tensor(labels[:, 0])  # classes
             # cf = torch.bincount(c.long(), minlength=nc) + 1.  # frequency
             # model._initialize_biases(cf.to(device))
@@ -268,8 +320,8 @@ def train(hyp, opt, device, tb_writer=None):
                     tb_writer.add_histogram('classes', c, 0)
 
             # Anchors
-            if not opt.noautoanchor:
-                check_anchors(dataset, model=model, thr=hyp['anchor_t'], imgsz=imgsz)
+            # if not opt.noautoanchor:
+                # check_anchors(dataset, model=model, thr=hyp['anchor_t'], imgsz=imgsz)
             # model.half().float()  # pre-reduce anchor precision
 
     # DDP mode
@@ -286,7 +338,7 @@ def train(hyp, opt, device, tb_writer=None):
     model.nc = nc  # attach number of classes to model
     model.hyp = hyp  # attach hyperparameters to model
     model.gr = 1.0  # iou loss ratio (obj_loss = 1.0 or iou)
-    model.class_weights = labels_to_class_weights(dataset.labels, nc).to(device) * nc  # attach class weights
+    model.class_weights = labels_to_class_weights(dataset_labels, nc).to(device) * nc  # attach class weights
     model.names = names
 
     # Start training
@@ -305,37 +357,45 @@ def train(hyp, opt, device, tb_writer=None):
                 f'Starting training for {epochs} epochs...')
     torch.save(model, wdir / 'init.pt')
     for epoch in range(start_epoch, epochs):  # epoch ------------------------------------------------------------------
-        model.train()
+        model.eval()
+        model.map_linear_trans1.train()
+        model.map_linear_trans2.train()
+        model.map_linear_trans3.train()
+        model.map_linear_trans4.train()
+        model.map_linear_trans5.train()
+        model.map_linear_trans6.train()
+        model.map_classifier.train()
 
         # Update image weights (optional)
-        if opt.image_weights:
-            # Generate indices
-            if rank in [-1, 0]:
-                cw = model.class_weights.cpu().numpy() * (1 - maps) ** 2 / nc  # class weights
-                iw = labels_to_image_weights(dataset.labels, nc=nc, class_weights=cw)  # image weights
-                dataset.indices = random.choices(range(dataset.n), weights=iw, k=dataset.n)  # rand weighted idx
-            # Broadcast if DDP
-            if rank != -1:
-                indices = (torch.tensor(dataset.indices) if rank == 0 else torch.zeros(dataset.n)).int()
-                dist.broadcast(indices, 0)
-                if rank != 0:
-                    dataset.indices = indices.cpu().numpy()
+        # if opt.image_weights:
+        #     # Generate indices
+        #     if rank in [-1, 0]:
+        #         cw = model.class_weights.cpu().numpy() * (1 - maps) ** 2 / nc  # class weights
+        #         iw = labels_to_image_weights(dataset_labels, nc=nc, class_weights=cw)  # image weights
+        #         dataset.indices = random.choices(range(dataset.n), weights=iw, k=dataset.n)  # rand weighted idx
+        #     # Broadcast if DDP
+        #     if rank != -1:
+        #         indices = (torch.tensor(dataset.indices) if rank == 0 else torch.zeros(dataset.n)).int()
+        #         dist.broadcast(indices, 0)
+        #         if rank != 0:
+        #             dataset.indices = indices.cpu().numpy()
 
         # Update mosaic border
         # b = int(random.uniform(0.25 * imgsz, 0.75 * imgsz + gs) // gs * gs)
         # dataset.mosaic_border = [b - imgsz, -b]  # height, width borders
 
         mloss = torch.zeros(4, device=device)  # mean losses
+        mmv_loss = 0.
         if rank != -1:
             dataloader.sampler.set_epoch(epoch)
         pbar = enumerate(dataloader)
-        logger.info(('\n' + '%10s' * 8) % ('Epoch', 'gpu_mem', 'box', 'obj', 'cls', 'total', 'labels', 'img_size'))
+        logger.info(('\n' + '%10s' * 9) % ('Epoch', 'gpu_mem', 'box', 'obj', 'cls', 'total', 'mv_loss', 'labels', 'img_size'))
         if rank in [-1, 0]:
             pbar = tqdm(pbar, total=nb)  # progress bar
         optimizer.zero_grad()
-        for i, (imgs, targets, paths, _) in pbar:  # batch -------------------------------------------------------------
+        for i, (imgs, targets, map_gt, _, paths) in pbar:  # batch -------------------------------------------------------------
             ni = i + nb * epoch  # number integrated batches (since train start)
-            imgs = imgs.to(device, non_blocking=True).float() / 255.0  # uint8 to float32, 0-255 to 0.0-1.0
+            imgs = imgs.to(device, non_blocking=True).float() # uint8 to float32
 
             # Warmup
             if ni <= nw:
@@ -358,18 +418,29 @@ def train(hyp, opt, device, tb_writer=None):
 
             # Forward
             with amp.autocast(enabled=cuda):
-                pred = model(imgs)  # forward
+                batch_tmp = imgs.shape[0] // base_set.num_cam
+                imgs_split = imgs.view(base_set.num_cam, batch_tmp, *imgs.shape[1:])
+                train_out, _, map_res = model(imgs_split)  # forward
                 if hyp['loss_ota'] == 1:
-                    loss, loss_items = compute_loss_ota(pred, targets.to(device), imgs)  # loss scaled by batch_size
+                    loss, loss_items = compute_loss_ota(train_out, targets.to(device), imgs)  # loss scaled by batch_size
                 else:
-                    loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
+                    loss, loss_items = compute_loss(train_out, targets.to(device))  # loss scaled by batch_size
                 if rank != -1:
                     loss *= opt.world_size  # gradient averaged between devices in DDP mode
                 if opt.quad:
                     loss *= 4.
 
+                # Multivew loss
+                mv_loss = mv_criterion(map_res, map_gt.to(map_res.device), dataloader.dataset.map_kernel)
+
             # Backward
-            scaler.scale(loss).backward()
+            alpha = 0
+            beta = 1
+            # if epoch > 5:
+            #     beta = 0.5
+            scaler.scale(mv_loss).backward()
+            # scaler.scale(loss).backward()
+            # torch.nn.utils.clip_grad_norm(model.parameters(), 2.)
 
             # Optimize
             if ni % accumulate == 0:
@@ -382,9 +453,10 @@ def train(hyp, opt, device, tb_writer=None):
             # Print
             if rank in [-1, 0]:
                 mloss = (mloss * i + loss_items) / (i + 1)  # update mean losses
+                mmv_loss = (mmv_loss * i + mv_loss) / (i + 1)  # update mean losses
                 mem = '%.3gG' % (torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0)  # (GB)
-                s = ('%10s' * 2 + '%10.4g' * 6) % (
-                    '%g/%g' % (epoch, epochs - 1), mem, *mloss, targets.shape[0], imgs.shape[-1])
+                s = ('%10s' * 2 + '%10.4g' * 7) % (
+                    '%g/%g' % (epoch, epochs - 1), mem, *mloss, mmv_loss, targets.shape[0], imgs.shape[-1])
                 pbar.set_description(s)
 
                 # Plot
@@ -408,35 +480,38 @@ def train(hyp, opt, device, tb_writer=None):
         # DDP process 0 or single-GPU
         if rank in [-1, 0]:
             # mAP
-            ema.update_attr(model, include=['yaml', 'nc', 'hyp', 'gr', 'names', 'stride', 'class_weights'])
+            # ema.update_attr(model, include=['yaml', 'nc', 'hyp', 'gr', 'names', 'stride', 'class_weights', 'upsample_shape', 'reducedgrid_shape', 'coord_map'])
             final_epoch = epoch + 1 == epochs
             if not opt.notest or final_epoch:  # Calculate mAP
                 wandb_logger.current_epoch = epoch + 1
                 results, maps, times = test.test(data_dict,
-                                                 batch_size=batch_size * 2,
+                                                 batch_size=batch_size,
                                                  imgsz=imgsz_test,
-                                                 model=ema.ema,
+                                                 shapes = ((h0, w0), ((h / h0, w / w0), (0., 0.))),
+                                                 model=model,
                                                  single_cls=opt.single_cls,
                                                  dataloader=testloader,
                                                  save_dir=save_dir,
                                                  verbose=nc < 50 and final_epoch,
                                                  plots=plots and final_epoch,
                                                  wandb_logger=wandb_logger,
-                                                 compute_loss=compute_loss,
-                                                 is_coco=is_coco)
+                                                 compute_loss=compute_loss_ota,
+                                                 is_coco=is_coco,
+                                                 num_cam=base_set.num_cam)
 
             # Write
             with open(results_file, 'a') as f:
-                f.write(s + '%10.4g' * 7 % results + '\n')  # append metrics, val_loss
+                f.write(s + '%10.4g' * 12 % results + '\n')  # append metrics, val_loss
             if len(opt.name) and opt.bucket:
                 os.system('gsutil cp %s gs://%s/results/results%s.txt' % (results_file, opt.bucket, opt.name))
 
             # Log
-            tags = ['train/box_loss', 'train/obj_loss', 'train/cls_loss',  # train loss
+            tags = ['train/box_loss', 'train/obj_loss', 'train/cls_loss',  'train/mv_loss',# train loss
                     'metrics/precision', 'metrics/recall', 'metrics/mAP_0.5', 'metrics/mAP_0.5:0.95',
-                    'val/box_loss', 'val/obj_loss', 'val/cls_loss',  # val loss
+                    'metrics/mv_rec', 'metrics/mv_prec', 'metrics/moda', 'metrics/modp',
+                    'val/box_loss', 'val/obj_loss', 'val/cls_loss', 'val/mv_loss',  # val loss
                     'x/lr0', 'x/lr1', 'x/lr2']  # params
-            for x, tag in zip(list(mloss[:-1]) + list(results) + lr, tags):
+            for x, tag in zip(list(mloss[:-1]) + [mmv_loss.item()] + list(results) + lr, tags):
                 if tb_writer:
                     tb_writer.add_scalar(tag, x, epoch)  # tensorboard
                 if wandb_logger.wandb:
@@ -454,8 +529,8 @@ def train(hyp, opt, device, tb_writer=None):
                         'best_fitness': best_fitness,
                         'training_results': results_file.read_text(),
                         'model': deepcopy(model.module if is_parallel(model) else model),
-                        'ema': deepcopy(ema.ema),
-                        'updates': ema.updates,
+                        # 'ema': deepcopy(ema.ema),
+                        # 'updates': ema.updates,
                         'optimizer': optimizer.state_dict(),
                         'wandb_id': wandb_logger.wandb_run.id if wandb_logger.wandb else None}
 
@@ -492,8 +567,9 @@ def train(hyp, opt, device, tb_writer=None):
         if opt.data.endswith('coco.yaml') and nc == 80:  # if COCO
             for m in (last, best) if best.exists() else (last):  # speed, mAP tests
                 results, _, _ = test.test(opt.data,
-                                          batch_size=batch_size * 2,
+                                          batch_size=batch_size,
                                           imgsz=imgsz_test,
+                                          shapes = ((h0, w0), ((h / h0, w / w0), 0.)),
                                           conf_thres=0.001,
                                           iou_thres=0.7,
                                           model=attempt_load(m, device),

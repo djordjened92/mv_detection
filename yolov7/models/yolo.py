@@ -1,15 +1,18 @@
 import argparse
+from importlib.metadata import requires
 import logging
 import sys
 from copy import deepcopy
 
 sys.path.append('./')  # to run '$ python *.py' files in subdirectories
 logger = logging.getLogger(__name__)
+
 import torch
+import torch.nn.functional as F
 from models.common import *
 from models.experimental import *
 from utils.autoanchor import check_anchor_order
-from utils.general import make_divisible, check_file, set_logging
+from utils.general import make_divisible, check_file, set_logging, non_max_suppression
 from utils.torch_utils import time_synchronized, fuse_conv_and_bn, model_info, scale_img, initialize_weights, \
     select_device, copy_attr
 from utils.loss import SigmoidBin
@@ -104,7 +107,7 @@ class IDetect(nn.Module):
     def __init__(self, nc=80, anchors=(), ch=()):  # detection layer
         super(IDetect, self).__init__()
         self.nc = nc  # number of classes
-        self.no = nc + 5  # number of outputs per anchor
+        self.no = nc + 5 # number of outputs per anchor
         self.nl = len(anchors)  # number of detection layers
         self.na = len(anchors[0]) // 2  # number of anchors
         self.grid = [torch.zeros(1)] * self.nl  # init grid
@@ -119,14 +122,14 @@ class IDetect(nn.Module):
     def forward(self, x):
         # x = x.copy()  # for profiling
         z = []  # inference output
-        self.training |= self.export
+
         for i in range(self.nl):
             x[i] = self.m[i](self.ia[i](x[i]))  # conv
             x[i] = self.im[i](x[i])
             bs, _, ny, nx = x[i].shape  # x(bs,255,20,20) to x(bs,3,20,20,85)
             x[i] = x[i].view(bs, self.na, self.no, ny, nx).permute(0, 1, 3, 4, 2).contiguous()
-
-            if not self.training:  # inference
+            
+            if self.stride is not None:
                 if self.grid[i].shape[2:4] != x[i].shape[2:4]:
                     self.grid[i] = self._make_grid(nx, ny).to(x[i].device)
 
@@ -135,7 +138,7 @@ class IDetect(nn.Module):
                 y[..., 2:4] = (y[..., 2:4] * 2) ** 2 * self.anchor_grid[i]  # wh
                 z.append(y.view(bs, -1, self.no))
 
-        return x if self.training else (torch.cat(z, 1), x)
+        return x if self.stride is None else (torch.cat(z, 1), x)
     
     def fuseforward(self, x):
         # x = x.copy()  # for profiling
@@ -529,6 +532,12 @@ class Model(nn.Module):
         self.names = [str(i) for i in range(self.yaml['nc'])]  # default names
         # print([x.shape for x in self.forward(torch.zeros(1, ch, 64, 64))])
 
+        self.map_classifier = nn.Sequential(nn.Conv2d(1, 32, 3, padding=1), nn.ReLU(),
+                                            nn.Conv2d(32, 256, 3, padding=1), nn.ReLU(),
+                                            # nn.Conv2d(256, 512, 3, padding='same'), nn.ReLU(),
+                                            nn.Conv2d(256, 512, 3, padding=1), nn.ReLU(),
+                                            nn.Conv2d(512, 1, 3, padding=4, dilation=4))
+
         # Build strides, anchors
         m = self.model[-1]  # Detect()
         if isinstance(m, Detect):
@@ -541,7 +550,7 @@ class Model(nn.Module):
             # print('Strides: %s' % m.stride.tolist())
         if isinstance(m, IDetect):
             s = 256  # 2x min stride
-            m.stride = torch.tensor([s / x.shape[-2] for x in self.forward(torch.zeros(1, ch, s, s))])  # forward
+            m.stride = torch.tensor([s / x.shape[-2] for x in self.forward_once(torch.zeros(1, ch, s, s))])  # forward
             check_anchor_order(m)
             m.anchors /= m.stride.view(-1, 1, 1)
             self.stride = m.stride
@@ -578,7 +587,18 @@ class Model(nn.Module):
         self.info()
         logger.info('')
 
-    def forward(self, x, augment=False, profile=False):
+    def create_coord_map(self, img_size, with_r=False):
+        H, W, C = img_size
+        grid_x, grid_y = np.meshgrid(np.arange(W), np.arange(H))
+        grid_x = torch.from_numpy(grid_x / (W - 1) * 2 - 1).float()
+        grid_y = torch.from_numpy(grid_y / (H - 1) * 2 - 1).float()
+        ret = torch.stack([grid_x, grid_y], dim=0).unsqueeze(0)
+        if with_r:
+            rr = torch.sqrt(torch.pow(grid_x, 2) + torch.pow(grid_y, 2)).view([1, 1, H, W])
+            ret = torch.cat([ret, rr], dim=1)
+        return ret
+
+    def forward_orig(self, x, augment=False, profile=False):
         if augment:
             img_size = x.shape[-2:]  # height, width
             s = [1, 0.83, 0.67]  # scales
@@ -597,6 +617,53 @@ class Model(nn.Module):
             return torch.cat(y, 1), None  # augmented inference, train
         else:
             return self.forward_once(x, profile)  # single-scale inference, train
+    
+    def forward(self, x, profile=False):
+        inference = []
+        inf_nms = []
+        img_size = x.shape[-2:] # height, width
+        for view in x:
+            out = self.forward_once(view, profile)
+            inference.append(out)
+            nms = non_max_suppression(out[0], conf_thres=0.001, iou_thres=0.6)
+            inf_nms.append(nms)
+
+        # Create outter product
+        map_results = []
+        for view_boxes in zip(*inf_nms):
+            # nodes_h = []
+            # nodes_v = []
+            nodes = []
+            for boxes in view_boxes:
+                if boxes.numel():
+                    # nodes = boxes[..., -1]*boxes[..., 4].detach()
+                    center_euc = torch.norm(boxes[..., :2].detach() / torch.tensor([img_size[1], img_size[0]], device=x.device), dim=1)
+                    nodes.append(center_euc)
+                    # sort_idx = torch.argsort(boxes, 0)
+                    # nodes_h.append(nodes[sort_idx[:,0]])
+                    # nodes_v.append(nodes[sort_idx[:,1]])
+
+            if len(nodes):
+                nodes = torch.cat(nodes, -1)
+                comb_matrix = torch.outer(nodes, nodes) # outer product of nodes sorted by y and then by x axis
+                # Process combination matrix and predict global map
+                comb_matrix = F.interpolate(comb_matrix[None, None], torch.div(self.reducedgrid_shape, 3, rounding_mode='floor').tolist(), mode='bilinear')
+                comb_matrix = self.map_linear_trans1(comb_matrix)
+                comb_matrix = self.map_linear_trans2(torch.transpose(comb_matrix, -2, -1))
+                comb_matrix = self.map_linear_trans3(torch.transpose(comb_matrix, -2, -1))
+                comb_matrix = self.map_linear_trans4(torch.transpose(comb_matrix, -2, -1))
+                comb_matrix = torch.transpose(comb_matrix, -2, -1)
+                comb_matrix += self.map_linear_trans5(comb_matrix)
+                comb_matrix += self.map_linear_trans6(comb_matrix)
+                map_result = self.map_classifier(comb_matrix)
+                map_results.append(map_result)
+            else:
+                map_results.append(torch.zeros((1, 1, *self.reducedgrid_shape), device=x.device))
+
+        initial_preds = [torch.cat([out[1][i] for out in inference], 0) for i in range(3)]
+
+        return initial_preds, inf_nms, torch.cat(map_results, 0)
+            
 
     def forward_once(self, x, profile=False):
         y, dt = [], []  # outputs
@@ -826,10 +893,14 @@ if __name__ == '__main__':
     # Create model
     model = Model(opt.cfg).to(device)
     model.train()
+
+    img = torch.rand(2, 3, 640, 640).to(device)
+    y = model([img]*4)
+    print(y[-1].shape)
     
-    if opt.profile:
-        img = torch.rand(1, 3, 640, 640).to(device)
-        y = model(img, profile=True)
+    # if opt.profile:
+    #     img = torch.rand(1, 3, 640, 640).to(device)
+    #     y = model(img, profile=True)
 
     # Profile
     # img = torch.rand(8 if torch.cuda.is_available() else 1, 3, 640, 640).to(device)
