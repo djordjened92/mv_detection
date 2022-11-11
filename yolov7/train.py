@@ -42,6 +42,63 @@ from multiview_detector.loss.gaussian_mse import GaussianMSE
 logger = logging.getLogger(__name__)
 torch.autograd.set_detect_anomaly(True)
 
+class MapModel(nn.Module):
+    def __init__(self, reducedgrid_shape, img_size, device=torch.device('cuda')):
+        super().__init__()
+        self.device = device
+        self.reducedgrid_shape = reducedgrid_shape.to(self.device)
+        self.img_size = img_size
+        self.map_linear_trans = nn.Sequential(nn.Linear(self.reducedgrid_shape[1]*2, self.reducedgrid_shape[1]*2),
+                                        nn.LayerNorm([self.reducedgrid_shape[0]*2, self.reducedgrid_shape[1]*2]),
+                                        nn.ReLU(),
+                                        # nn.Linear(self.reducedgrid_shape[1]*2, self.reducedgrid_shape[1]*2),
+                                        # nn.LayerNorm([self.reducedgrid_shape[0]*2, self.reducedgrid_shape[1]*2]),
+                                        nn.Dropout(hyp['dropout2D']))
+        self.map_classifier = nn.Sequential(nn.Conv2d(9, 32, 3, stride=2, padding=1),
+                                        nn.LayerNorm(self.reducedgrid_shape),
+                                        nn.ReLU(),
+                                        nn.Conv2d(32, 128, 3, padding=1), 
+                                        nn.LayerNorm(self.reducedgrid_shape),
+                                        nn.ReLU(),
+                                        # nn.Conv2d(256, 512, 3, padding='same'), nn.ReLU(),
+                                        nn.Conv2d(128, 64, 3, padding=1), nn.ReLU(),
+                                        nn.Conv2d(64, 1, 3, padding=4, dilation=4))
+        self.coord_map = self.create_coord_map(self.reducedgrid_shape.cpu().numpy()*2)
+
+    def create_coord_map(self, img_size, with_r=False):
+        H, W = img_size
+        grid_x, grid_y = np.meshgrid(np.arange(W), np.arange(H))
+        grid_x = torch.from_numpy(grid_x / (W - 1) * 2 - 1).float()
+        grid_y = torch.from_numpy(grid_y / (H - 1) * 2 - 1).float()
+        ret = torch.stack([grid_x, grid_y], dim=0).unsqueeze(0)
+        if with_r:
+            rr = torch.sqrt(torch.pow(grid_x, 2) + torch.pow(grid_y, 2)).view([1, 1, H, W])
+            ret = torch.cat([ret, rr], dim=1)
+        return ret
+
+    def forward(self, x):
+        # Create outter product
+        map_results = []
+        for view_boxes in zip(*x):
+            maps = torch.zeros((1, 7, self.reducedgrid_shape[0]*2, self.reducedgrid_shape[1]*2), device=self.device)
+            for i, boxes in enumerate(view_boxes):
+                if boxes.numel():
+                    boxes = boxes.detach()
+                    yx_relative = boxes[..., :2] + torch.stack([torch.zeros_like(boxes[..., 3]), boxes[..., 3] / 2], dim=-1)
+                    yx_relative = torch.flip(yx_relative, dims=(1,))
+                    yx_relative = torch.clamp(yx_relative / self.img_size, min=0., max=1.)
+                    yx_map = (yx_relative * (self.reducedgrid_shape*2 - 1)).to(int)
+                    maps[0, i, yx_map[:, 0], yx_map[:, 1]] = boxes[..., 4].detach()
+
+            maps = torch.cat([maps, self.coord_map.to(self.device)], dim=1)
+            maps = self.map_linear_trans(maps)
+            map_result = self.map_classifier(maps)
+            map_results.append(map_result)
+
+        map_results = torch.cat(map_results, 0)
+
+        return map_results
+
 def train(hyp, opt, device, tb_writer=None):
     logger.info(colorstr('hyperparameters: ') + ', '.join(f'{k}={v}' for k, v in hyp.items()))
     save_dir, epochs, batch_size, total_batch_size, weights, rank, freeze = \
@@ -146,29 +203,32 @@ def train(hyp, opt, device, tb_writer=None):
                                              collate_fn=frameDataset.collate_fn)
     
     model.reducedgrid_shape = torch.tensor(train_set.reducedgrid_shape)
+    map_model = MapModel(torch.tensor(train_set.reducedgrid_shape), img_size=torch.tensor([h, w], device=device), device=device)
+    map_model.to(device)
     model.map_linear_trans1 = nn.Sequential(nn.Linear(torch.div(model.reducedgrid_shape[-1], 3, rounding_mode='floor'), torch.div(model.reducedgrid_shape[-1], 2, rounding_mode='floor'), device=device),
                                            nn.ReLU(),
                                            nn.Linear(torch.div(model.reducedgrid_shape[-1], 2, rounding_mode='floor'), torch.div(model.reducedgrid_shape[-1], 2, rounding_mode='floor'), device=device),
+                                           nn.LayerNorm([torch.div(model.reducedgrid_shape[0], 3, rounding_mode='floor'), torch.div(model.reducedgrid_shape[-1], 2, rounding_mode='floor')], device=device),
                                            nn.Dropout(hyp['dropout2D']))
     model.map_linear_trans2 = nn.Sequential(nn.Linear(torch.div(model.reducedgrid_shape[0], 3, rounding_mode='floor'), torch.div(model.reducedgrid_shape[0], 2, rounding_mode='floor'), device=device),
                                            nn.ReLU(),
                                            nn.Linear(torch.div(model.reducedgrid_shape[0], 2, rounding_mode='floor'), torch.div(model.reducedgrid_shape[0], 2, rounding_mode='floor'), device=device),
+                                           nn.LayerNorm([torch.div(model.reducedgrid_shape[-1], 2, rounding_mode='floor'), torch.div(model.reducedgrid_shape[0], 2, rounding_mode='floor')], device=device),
                                            nn.Dropout(hyp['dropout2D']))
     model.map_linear_trans3 = nn.Sequential(nn.Linear(torch.div(model.reducedgrid_shape[-1], 2, rounding_mode='floor'), model.reducedgrid_shape[-1], device=device),
                                            nn.ReLU(),
                                            nn.Linear(model.reducedgrid_shape[-1], model.reducedgrid_shape[-1], device=device),
+                                           nn.LayerNorm([torch.div(model.reducedgrid_shape[0], 2, rounding_mode='floor'), model.reducedgrid_shape[-1]], device=device),
                                            nn.Dropout(hyp['dropout2D']))
     model.map_linear_trans4 = nn.Sequential(nn.Linear(torch.div(model.reducedgrid_shape[0], 2, rounding_mode='floor'), model.reducedgrid_shape[0], device=device),
                                            nn.ReLU(),
                                            nn.Linear(model.reducedgrid_shape[0], model.reducedgrid_shape[0], device=device),
+                                           nn.LayerNorm([model.reducedgrid_shape[1], model.reducedgrid_shape[0]], device=device),
                                            nn.Dropout(hyp['dropout2D']))
     model.map_linear_trans5 = nn.Sequential(nn.Linear(model.reducedgrid_shape[1], model.reducedgrid_shape[1], device=device),
                                            nn.ReLU(),
                                            nn.Linear(model.reducedgrid_shape[1], model.reducedgrid_shape[1], device=device),
-                                           nn.Dropout(hyp['dropout2D']))
-    model.map_linear_trans6 = nn.Sequential(nn.Linear(model.reducedgrid_shape[1], model.reducedgrid_shape[1], device=device),
-                                           nn.ReLU(),
-                                           nn.Linear(model.reducedgrid_shape[1], model.reducedgrid_shape[1], device=device),
+                                           nn.LayerNorm([model.reducedgrid_shape[0], model.reducedgrid_shape[1]], device=device),
                                            nn.Dropout(hyp['dropout2D']))
     mv_criterion = GaussianMSE().cuda()
 
@@ -245,13 +305,13 @@ def train(hyp, opt, device, tb_writer=None):
                 pg0.append(v.rbr_dense.vector)
 
     if opt.adam:
-        optimizer = optim.Adam(pg0, lr=hyp['lr0'], betas=(hyp['momentum'], 0.999))  # adjust beta1 to momentum
+        optimizer = optim.Adam(map_model.parameters(), lr=hyp['lr0'], betas=(hyp['momentum'], 0.999))  # adjust beta1 to momentum
     else:
-        optimizer = optim.SGD(pg0, lr=hyp['lr0'], momentum=hyp['momentum'], nesterov=True)
+        optimizer = optim.SGD(map_model.parameters(), lr=hyp['lr0'], momentum=hyp['momentum'], nesterov=True)
 
-    optimizer.add_param_group({'params': pg1, 'weight_decay': hyp['weight_decay']})  # add pg1 with weight_decay
-    optimizer.add_param_group({'params': pg2})  # add pg2 (biases)
-    logger.info('Optimizer groups: %g .bias, %g conv.weight, %g other' % (len(pg2), len(pg1), len(pg0)))
+    # optimizer.add_param_group({'params': pg1, 'weight_decay': hyp['weight_decay']})  # add pg1 with weight_decay
+    # optimizer.add_param_group({'params': pg2})  # add pg2 (biases)
+    # logger.info('Optimizer groups: %g .bias, %g conv.weight, %g other' % (len(pg2), len(pg1), len(pg0)))
     del pg0, pg1, pg2
 
     # Scheduler https://arxiv.org/pdf/1812.01187.pdf
@@ -358,13 +418,7 @@ def train(hyp, opt, device, tb_writer=None):
     torch.save(model, wdir / 'init.pt')
     for epoch in range(start_epoch, epochs):  # epoch ------------------------------------------------------------------
         model.eval()
-        model.map_linear_trans1.train()
-        model.map_linear_trans2.train()
-        model.map_linear_trans3.train()
-        model.map_linear_trans4.train()
-        model.map_linear_trans5.train()
-        model.map_linear_trans6.train()
-        model.map_classifier.train()
+        map_model.train()
 
         # Update image weights (optional)
         # if opt.image_weights:
@@ -420,7 +474,7 @@ def train(hyp, opt, device, tb_writer=None):
             with amp.autocast(enabled=cuda):
                 batch_tmp = imgs.shape[0] // base_set.num_cam
                 imgs_split = imgs.view(base_set.num_cam, batch_tmp, *imgs.shape[1:])
-                train_out, _, map_res = model(imgs_split)  # forward
+                train_out, inf_nms = model(imgs_split)  # forward
                 if hyp['loss_ota'] == 1:
                     loss, loss_items = compute_loss_ota(train_out, targets.to(device), imgs)  # loss scaled by batch_size
                 else:
@@ -430,25 +484,16 @@ def train(hyp, opt, device, tb_writer=None):
                 if opt.quad:
                     loss *= 4.
 
+                map_results = map_model(inf_nms)
                 # Multivew loss
-                mv_loss = mv_criterion(map_res, map_gt.to(map_res.device), dataloader.dataset.map_kernel)
+                mv_loss = mv_criterion(map_results, map_gt.to(map_results.device), dataloader.dataset.map_kernel)
 
             # Backward
-            alpha = 0
-            beta = 1
-            # if epoch > 5:
-            #     beta = 0.5
-            scaler.scale(mv_loss).backward()
-            # scaler.scale(loss).backward()
-            # torch.nn.utils.clip_grad_norm(model.parameters(), 2.)
+            mv_loss.backward()
 
             # Optimize
-            if ni % accumulate == 0:
-                scaler.step(optimizer)  # optimizer.step
-                scaler.update()
-                optimizer.zero_grad()
-                if ema:
-                    ema.update(model)
+            optimizer.step()  # optimizer.step
+            optimizer.zero_grad()
 
             # Print
             if rank in [-1, 0]:
@@ -489,6 +534,7 @@ def train(hyp, opt, device, tb_writer=None):
                                                  imgsz=imgsz_test,
                                                  shapes = ((h0, w0), ((h / h0, w / w0), (0., 0.))),
                                                  model=model,
+                                                 map_model = map_model,
                                                  single_cls=opt.single_cls,
                                                  dataloader=testloader,
                                                  save_dir=save_dir,

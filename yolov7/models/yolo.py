@@ -532,12 +532,6 @@ class Model(nn.Module):
         self.names = [str(i) for i in range(self.yaml['nc'])]  # default names
         # print([x.shape for x in self.forward(torch.zeros(1, ch, 64, 64))])
 
-        self.map_classifier = nn.Sequential(nn.Conv2d(1, 32, 3, padding=1), nn.ReLU(),
-                                            nn.Conv2d(32, 256, 3, padding=1), nn.ReLU(),
-                                            # nn.Conv2d(256, 512, 3, padding='same'), nn.ReLU(),
-                                            nn.Conv2d(256, 512, 3, padding=1), nn.ReLU(),
-                                            nn.Conv2d(512, 1, 3, padding=4, dilation=4))
-
         # Build strides, anchors
         m = self.model[-1]  # Detect()
         if isinstance(m, Detect):
@@ -587,16 +581,6 @@ class Model(nn.Module):
         self.info()
         logger.info('')
 
-    def create_coord_map(self, img_size, with_r=False):
-        H, W, C = img_size
-        grid_x, grid_y = np.meshgrid(np.arange(W), np.arange(H))
-        grid_x = torch.from_numpy(grid_x / (W - 1) * 2 - 1).float()
-        grid_y = torch.from_numpy(grid_y / (H - 1) * 2 - 1).float()
-        ret = torch.stack([grid_x, grid_y], dim=0).unsqueeze(0)
-        if with_r:
-            rr = torch.sqrt(torch.pow(grid_x, 2) + torch.pow(grid_y, 2)).view([1, 1, H, W])
-            ret = torch.cat([ret, rr], dim=1)
-        return ret
 
     def forward_orig(self, x, augment=False, profile=False):
         if augment:
@@ -621,48 +605,15 @@ class Model(nn.Module):
     def forward(self, x, profile=False):
         inference = []
         inf_nms = []
-        img_size = x.shape[-2:] # height, width
         for view in x:
             out = self.forward_once(view, profile)
             inference.append(out)
             nms = non_max_suppression(out[0], conf_thres=0.001, iou_thres=0.6)
             inf_nms.append(nms)
 
-        # Create outter product
-        map_results = []
-        for view_boxes in zip(*inf_nms):
-            # nodes_h = []
-            # nodes_v = []
-            nodes = []
-            for boxes in view_boxes:
-                if boxes.numel():
-                    # nodes = boxes[..., -1]*boxes[..., 4].detach()
-                    center_euc = torch.norm(boxes[..., :2].detach() / torch.tensor([img_size[1], img_size[0]], device=x.device), dim=1)
-                    nodes.append(center_euc)
-                    # sort_idx = torch.argsort(boxes, 0)
-                    # nodes_h.append(nodes[sort_idx[:,0]])
-                    # nodes_v.append(nodes[sort_idx[:,1]])
-
-            if len(nodes):
-                nodes = torch.cat(nodes, -1)
-                comb_matrix = torch.outer(nodes, nodes) # outer product of nodes sorted by y and then by x axis
-                # Process combination matrix and predict global map
-                comb_matrix = F.interpolate(comb_matrix[None, None], torch.div(self.reducedgrid_shape, 3, rounding_mode='floor').tolist(), mode='bilinear')
-                comb_matrix = self.map_linear_trans1(comb_matrix)
-                comb_matrix = self.map_linear_trans2(torch.transpose(comb_matrix, -2, -1))
-                comb_matrix = self.map_linear_trans3(torch.transpose(comb_matrix, -2, -1))
-                comb_matrix = self.map_linear_trans4(torch.transpose(comb_matrix, -2, -1))
-                comb_matrix = torch.transpose(comb_matrix, -2, -1)
-                comb_matrix += self.map_linear_trans5(comb_matrix)
-                comb_matrix += self.map_linear_trans6(comb_matrix)
-                map_result = self.map_classifier(comb_matrix)
-                map_results.append(map_result)
-            else:
-                map_results.append(torch.zeros((1, 1, *self.reducedgrid_shape), device=x.device))
-
         initial_preds = [torch.cat([out[1][i] for out in inference], 0) for i in range(3)]
 
-        return initial_preds, inf_nms, torch.cat(map_results, 0)
+        return initial_preds, inf_nms
             
 
     def forward_once(self, x, profile=False):

@@ -33,6 +33,7 @@ def test(data,
          single_cls=False,
          verbose=False,
          model=None,
+         map_model=None,
          mv_cls_thres=0.4,
          dataloader=None,
          save_dir=Path(''),  # for saving images
@@ -74,6 +75,7 @@ def test(data,
 
     # Configure
     model.eval()
+    map_model.eval()
     if isinstance(data, str):
         is_coco = data.endswith('coco.yaml')
         with open(data) as f:
@@ -115,7 +117,7 @@ def test(data,
         with torch.no_grad():
             # Run model
             t = time_synchronized()
-            train_out, nms_out, map_res = model(imgs_split)  # inference and training outputs
+            train_out, nms_out = model(imgs_split)  # inference and training outputs
             t0 += time_synchronized() - t
 
             # Compute yolo loss
@@ -212,6 +214,7 @@ def test(data,
             stats.append((correct.cpu(), pred[:, 4].cpu(), pred[:, 5].cpu(), tcls))
 
         # Multiview statistics per image
+        map_res = map_model(nms_out)
         mv_loss += mv_criterion(map_res, map_gt.to(map_res.device), dataloader.dataset.map_kernel).item()
         map_res = map_res.sigmoid()
         for i in range(batch_tmp):
